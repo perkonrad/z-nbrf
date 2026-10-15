@@ -8,7 +8,7 @@
 //    i.e. exactly one symbol after the true peak.
 //  * On commit: w = arg(sum C_{q+1} C_q^*)/16 rad/sym; quarters aligned with w and summed
 //    coherently; outputs the phase of preamble symbol 62 and w (see estimator below).
-// Requires >= ~24 clocks between input symbols (guaranteed: symbol period = 8R >= 64).
+// Requires >= 9 clocks between input symbols (symbol period = 8R >= 16).
 module preamble_det
   import nb_coefs_pkg::*;
 (
@@ -29,15 +29,8 @@ module preamble_det
   logic signed [15:0] wi [L], wq [L];       // [0] newest
   logic signed [39:0] E;
   logic signed [21:0] ci [4], cq [4];
-  logic [3:0]         j;
-  logic [1:0]         q;
   logic [47:0]        m_acc;
   logic [43:0]        thr_e;
-  logic [43:0]        sq_i, sq_q;
-  logic               mag_v;
-
-  typedef enum logic [2:0] {D_IDLE, D_ACC, D_MAG, D_MAG2, D_CMP} dst_t;
-  dst_t dst;
 
   logic signed [21:0] cand_ci [4], cand_cq [4];
   logic [47:0]        cand_m;
@@ -68,18 +61,47 @@ module preamble_det
     end
   end
 
-  // ---------------- detection ----------------
-  logic signed [21:0] ci_s, cq_s;
-  always_comb begin
-    ci_s = ci[q] >>> 4;
-    cq_s = cq[q] >>> 4;
-  end
-
+  // ---------------- detection: fixed-latency parallel pipeline (8 clocks) ----------------
+  // d1..d4: four 16-input +-1 adder trees (preamble is a constant -> no muxes)
+  // d5: squares of C>>4 (DSP, registered)   d6/d7: sum   d4: thr*E   d8: compare + peak pick
+  logic [8:1]         dv;
+  logic signed [21:0] l1i [4][8], l1q [4][8], l2i [4][4], l2q [4][4], l3i [4][2], l3q [4][2];
+  logic signed [43:0] sqv [8];
+  logic [45:0]        mq [4];
   logic start_est;
+
+  function automatic logic signed [21:0] term(input logic signed [15:0] x, input bit pos);
+    return pos ? 22'(x) : -22'(x);
+  endfunction
+
+  always_ff @(posedge clk) begin
+    dv <= rst ? '0 : {dv[7:1], in_vld};
+    // d1: pairs (preamble symbol n sits at window index 63-n)
+    for (int k = 0; k < 4; k++)
+      for (int m = 0; m < 8; m++) begin
+        l1i[k][m] <= term(wi[63-16*k-2*m], PREAMBLE[16*k+2*m]) + term(wi[62-16*k-2*m], PREAMBLE[16*k+2*m+1]);
+        l1q[k][m] <= term(wq[63-16*k-2*m], PREAMBLE[16*k+2*m]) + term(wq[62-16*k-2*m], PREAMBLE[16*k+2*m+1]);
+      end
+    // d2, d3, d4
+    for (int k = 0; k < 4; k++) begin
+      for (int m = 0; m < 4; m++) begin l2i[k][m] <= l1i[k][2*m] + l1i[k][2*m+1]; l2q[k][m] <= l1q[k][2*m] + l1q[k][2*m+1]; end
+      for (int m = 0; m < 2; m++) begin l3i[k][m] <= l2i[k][2*m] + l2i[k][2*m+1]; l3q[k][m] <= l2q[k][2*m] + l2q[k][2*m+1]; end
+      ci[k] <= l3i[k][0] + l3i[k][1];
+      cq[k] <= l3q[k][0] + l3q[k][1];
+    end
+    thr_e <= 44'(thr) * 44'($unsigned(E[39:8]));      // E settled 2 clocks after in_vld
+    // d5: squares
+    for (int k = 0; k < 4; k++) begin
+      sqv[2*k]   <= 44'((ci[k] >>> 4) * (ci[k] >>> 4));
+      sqv[2*k+1] <= 44'((cq[k] >>> 4) * (cq[k] >>> 4));
+    end
+    // d6, d7
+    for (int k = 0; k < 4; k++) mq[k] <= 46'(sqv[2*k]) + 46'(sqv[2*k+1]);
+    m_acc <= 48'(mq[0]) + 48'(mq[1]) + 48'(mq[2]) + 48'(mq[3]);
+  end
 
   always_ff @(posedge clk) begin
     if (rst) begin
-      dst       <= D_IDLE;
       cand_v    <= 1'b0;
       cand_m    <= '0;
       commit    <= 1'b0;
@@ -89,66 +111,24 @@ module preamble_det
     end else begin
       commit    <= 1'b0;
       start_est <= 1'b0;
-      case (dst)
-        D_IDLE: if (in_vld) begin
-          for (int k = 0; k < 4; k++) begin ci[k] <= '0; cq[k] <= '0; end
-          j   <= '0;
-          dst <= D_ACC;
+      if (dv[8]) begin
+        logic above, higher;
+        above  = ({m_acc, 4'b0} >= 52'(thr_e)) && (E > 40'sd16777216);   // rho >= thr/256, signal present
+        higher = (m_acc > cand_m);
+        if (above && (!cand_v || higher)) begin
+          cand_v <= 1'b1;
+          cand_m <= m_acc;
+          cand_e <= E;
+          for (int k = 0; k < 4; k++) begin cand_ci[k] <= ci[k]; cand_cq[k] <= cq[k]; end
+        end else if (cand_v) begin
+          cand_v    <= 1'b0;
+          cand_m    <= '0;
+          commit    <= 1'b1;
+          start_est <= 1'b1;
+          peak_m    <= cand_m[31:0];
+          peak_e    <= cand_e[35:4];
         end
-        D_ACC: begin
-          // preamble symbol n sits at window index 63-n
-          for (int k = 0; k < 4; k++) begin
-            if (PREAMBLE[16*k + int'(j)]) begin
-              ci[k] <= ci[k] + 22'(wi[63 - 16*k - int'(j)]);
-              cq[k] <= cq[k] + 22'(wq[63 - 16*k - int'(j)]);
-            end else begin
-              ci[k] <= ci[k] - 22'(wi[63 - 16*k - int'(j)]);
-              cq[k] <= cq[k] - 22'(wq[63 - 16*k - int'(j)]);
-            end
-          end
-          j    <= j + 4'd1;
-          thr_e <= 44'(thr) * 44'($unsigned(E[39:8]));   // E is stable during ACC
-          if (j == 4'd15) begin
-            dst   <= D_MAG;
-            q     <= '0;
-            m_acc <= '0;
-            mag_v <= 1'b0;
-          end
-        end
-        D_MAG: begin
-          // registered squares of quarter q, accumulated one cycle later
-          sq_i  <= 44'(ci_s * ci_s);
-          sq_q  <= 44'(cq_s * cq_s);
-          if (mag_v) m_acc <= m_acc + 48'(sq_i) + 48'(sq_q);
-          mag_v <= 1'b1;
-          q     <= q + 2'd1;
-          if (q == 2'd3) dst <= D_MAG2;
-        end
-        D_MAG2: begin
-          m_acc <= m_acc + 48'(sq_i) + 48'(sq_q);
-          dst   <= D_CMP;
-        end
-        D_CMP: begin
-          logic above, higher;
-          above  = ({m_acc, 4'b0} >= 52'(thr_e)) && (E > 40'sd16777216);   // m*4096 >= thr*E, and signal present
-          higher = (m_acc > cand_m);
-          dst <= D_IDLE;
-          if (above && (!cand_v || higher)) begin
-            cand_v <= 1'b1;
-            cand_m <= m_acc;
-            cand_e <= E;
-            for (int k = 0; k < 4; k++) begin cand_ci[k] <= ci[k]; cand_cq[k] <= cq[k]; end
-          end else if (cand_v) begin
-            cand_v    <= 1'b0;
-            cand_m    <= '0;
-            commit    <= 1'b1;
-            start_est <= 1'b1;
-            peak_m    <= cand_m[31:0];
-            peak_e    <= cand_e[35:4];
-          end
-        end
-        default: dst <= D_IDLE;
-      endcase
+      end
     end
   end
 
@@ -293,6 +273,6 @@ module preamble_det
     end
   end
 `ifndef SYNTHESIS
-  always @(posedge clk) if (!rst && in_vld && dst != D_IDLE) $error("preamble_det overrun: new input before processing finished");
+  always @(posedge clk) if (!rst && in_vld && |dv[7:1]) $error("preamble_det overrun: symbols closer than 8 clocks");
 `endif
 endmodule

@@ -1,13 +1,13 @@
-// Complex CIC decimator, N=4, M=1, programmable rate R (2..63), runtime output shift.
+// Complex CIC decimator, N=4, M=1, programmable rate R (2..127), runtime output shift.
 // Gain = R^4; output = sat(round(acc >>> shift)).
 module cic_dec #(
   parameter int IW = 16,
   parameter int OW = 18,
-  parameter int W  = 40          // >= IW + 4*log2(Rmax)
+  parameter int W  = 44          // >= IW + 4*log2(Rmax): 16 + 4*log2(80) = 41.3
 )(
   input  logic                 clk,
   input  logic                 rst,
-  input  logic [5:0]           rate,
+  input  logic [6:0]           rate,
   input  logic [5:0]           shift,
   input  logic                 in_vld,
   input  logic signed [IW-1:0] in_i,
@@ -21,7 +21,7 @@ module cic_dec #(
   logic signed [W-1:0] ci [N+1], cq [N+1];   // comb stage outputs (ci[0] = decimated sample)
   logic signed [W-1:0] di [N], dq [N];       // comb delays
   logic [N:0] cv;
-  logic [5:0] cnt;
+  logic [6:0] cnt;
 
   always_ff @(posedge clk) begin
     if (rst) begin
@@ -37,13 +37,13 @@ module cic_dec #(
           ii[k] <= ii[k] + ii[k-1];
           iq[k] <= iq[k] + iq[k-1];
         end
-        if (cnt >= rate - 6'd1) begin
+        if (cnt >= rate - 7'd1) begin
           cnt   <= '0;
           ci[0] <= ii[N-1];
           cq[0] <= iq[N-1];
           cv[0] <= 1'b1;
         end else begin
-          cnt <= cnt + 6'd1;
+          cnt <= cnt + 7'd1;
         end
       end
       // pipelined combs, one stage per cycle

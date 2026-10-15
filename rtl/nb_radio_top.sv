@@ -5,7 +5,7 @@
 //   RF-DAC 4.096 GSPS, IQ, DUC x8 <- 512 MSPS complex, 2 samples/clk (DAC_SPC=2, default):
 //          {Q1,I1,Q0,I0}, sample 0 earliest; x2 linear interpolation in fabric (images -70 dB).
 //          DAC_SPC=1: 2.048 GSPS, 1 sample/clk {Q,I} (carriers < ~1.8 GHz).
-// Channel: R = 8..40 -> Rs = 32/R MBd, BW = 1.25*Rs = 40/R MHz.
+// Channel: R = 2..80 -> Rs = 32/R MBd, BW = 1.25*Rs = 40/R MHz (20 .. 0.5 MHz).
 //
 // TX: framer -> mapper -> RRC x4 -> CFIR x2 -> CIC xR -> gain -> RF-DAC
 // RX: RF-ADC -> CIC /R -> CFIR /2 -> RRC -> AGC -> Gardner/Farrow -> preamble det.
@@ -62,7 +62,8 @@ module nb_radio_top
   // ======================= registers / reset =======================
   logic        rst_hw, rst;
   logic [31:0] ctrl;
-  logic [5:0]  rate, rx_shift, tx_shift;
+  logic [6:0]  rate;
+  logic [5:0]  rx_shift, tx_shift;
   logic [15:0] tx_gain, ifs, agc_target;
   logic [11:0] test_len;
   logic [4:0]  agc_mu_sh, ted_kp_sh, ted_ki_sh, pll_kp_sh, pll_ki_sh, eq_mu_sh;
@@ -100,7 +101,7 @@ module nb_radio_top
 
   // ======================= TX =======================
   // rate strobes: ce8 = fs0/R (8 sps), ce4 = 4 sps, ce_sym = 1 sps
-  logic [5:0] cnt8;
+  logic [6:0] cnt8;
   logic       ph8;
   logic [1:0] ph4;
   logic       ce8, ce4, ce_sym;
@@ -108,12 +109,12 @@ module nb_radio_top
     if (rst) begin
       cnt8 <= '0; ph8 <= 1'b0; ph4 <= '0;
     end else begin
-      cnt8 <= (cnt8 >= rate - 6'd1) ? 6'd0 : cnt8 + 6'd1;
+      cnt8 <= (cnt8 >= rate - 7'd1) ? 7'd0 : cnt8 + 7'd1;
       if (ce8) ph8 <= ~ph8;
       if (ce4) ph4 <= ph4 + 2'd1;
     end
   end
-  assign ce8    = (cnt8 == 6'd0);
+  assign ce8    = (cnt8 == 7'd0);
   assign ce4    = ce8 && !ph8;
   assign ce_sym = ce4 && (ph4 == 2'd0);
 
@@ -148,7 +149,7 @@ module nb_radio_top
 
   // CIC xR
   logic signed [17:0] cic_ti, cic_tq;
-  cic_int #(.IW(16), .OW(18), .W(44)) u_cic_tx (
+  cic_int #(.IW(16), .OW(18), .W(46)) u_cic_tx (
     .clk(clk), .rst(rst), .shift(tx_shift), .ce(ce8), .in_i(cf_hi), .in_q(cf_hq),
     .out_i(cic_ti), .out_q(cic_tq)
   );
@@ -201,7 +202,7 @@ module nb_radio_top
 
   logic               cic_rv;
   logic signed [17:0] cic_ri, cic_rq;
-  cic_dec #(.IW(16), .OW(18), .W(40)) u_cic_rx (
+  cic_dec #(.IW(16), .OW(18), .W(44)) u_cic_rx (
     .clk(clk), .rst(rst), .rate(rate), .shift(rx_shift),
     .in_vld(rx_vld), .in_i(rx_i), .in_q(rx_q),
     .out_vld(cic_rv), .out_i(cic_ri), .out_q(cic_rq)

@@ -85,7 +85,7 @@ class NbRadio:
     def symbol_rate(self):
         return FS0 / (8 * self.R)
 
-    def set_loops(self, ted=(3, 10), pll=(3, 10), eq_mu_sh=6, agc_target=11650, agc_mu_sh=9):
+    def set_loops(self, ted=(4, 11), pll=(3, 10), eq_mu_sh=6, agc_target=11650, agc_mu_sh=9):
         """Loop gains as right-shifts (larger = slower)."""
         self.mmio.write(REG["TED"], (ted[1] << 8) | ted[0])
         self.mmio.write(REG["PLL"], (pll[1] << 8) | pll[0])

@@ -1,15 +1,17 @@
-// Symbol-rate back end: alignment delay line -> derotator (CORDIC) -> 5-tap complex DD-LMS
-// equalizer -> slicer -> decision-directed 2nd-order PLL.
+// Symbol-rate back end: alignment delay line -> derotator (pipelined CORDIC) -> 5-tap complex
+// DD-LMS equalizer -> slicer -> decision-directed 2nd-order PLL.
 //
-// Two concurrent stages (each ~27 clocks, symbol period >= 64 clocks):
-//   A: delay line + CORDIC derotation; owns the phase accumulator phi (advances by frq/symbol)
-//   B: equalizer MAC, slicer, phase detector, PLL filter, LMS tap update, phase anchoring;
-//      posts phase corrections to A (one extra symbol of PLL loop delay - negligible).
+// Streaming design for symbol periods down to 16 clocks (20 MHz channel, R = 2):
+//   A: 12-deep alignment line; owns the phase accumulator phi (advances by frq per symbol) and
+//      issues each symbol to the pipelined CORDIC (II = 1, latency 23).
+//   B: fixed-latency pipeline (11 clocks): parallel EQ MAC, slicer, phase detector, PLL filter,
+//      parallel LMS tap update + phase anchoring. Its recursion (taps, frq) closes before the
+//      next symbol arrives. Corrections to phi are posted to A (PLL loop delay ~2-3 symbols).
 //
 // Data-aided acquisition: on a preamble commit the delay-line entry holding preamble symbol 62
-// is tagged; when it reaches the derotator, phase/frequency are loaded from the estimator.
-// The tag travels with the symbol; at the equalizer output (centre tap = 2 symbols latency)
-// the deframer uses it as the frame reference (header starts 2 symbols after the tag).
+// is tagged; when it is popped, phase/frequency are loaded from the estimator (which has ~10
+// symbol periods to finish). The tag travels with the symbol; at the equalizer output (centre
+// tap = 2 symbols latency) the deframer uses it as the frame reference.
 module sym_proc
   import nb_pkg::*;
 (
@@ -43,45 +45,9 @@ module sym_proc
   output logic signed [31:0] pll_freq,
   output logic signed [31:0] pll_phase
 );
-  localparam int D   = 4;
+  localparam int D   = 12;     // alignment line depth (estimator budget ~ (D-2) symbols)
   localparam int NT  = 5;
   localparam int CT  = 2;
-
-  // ---------------- alignment delay line ----------------
-  logic signed [15:0] dli [D], dlq [D];
-  logic               dlt [D];
-  logic signed [15:0] pi_, pq_;
-  logic               ptag;
-
-  // ---------------- PLL state ----------------
-  logic signed [31:0] phi, frq;
-  logic signed [31:0] pend_phi, pend_f;
-  logic               pend_v;
-  logic [2:0]         hold;
-
-  // ---------------- equalizer ----------------
-  logic signed [15:0] xei [NT], xeq [NT];
-  logic               xet [NT];
-  logic signed [31:0] wai [NT], waq [NT];       // tap accumulators, 1.0 = 2^28
-  logic signed [39:0] acc_i, acc_q;
-  logic [2:0]         k;
-  logic signed [15:0] yi, yq, di, dq;
-  logic [3:0]         bt;
-  logic signed [17:0] th16;
-  logic signed [33:0] m0, m1, m2, m3;
-  logic signed [31:0] inc_pr, inc_ir, gr_r, gi_r;
-  logic signed [35:0] a_r, b_r;
-
-  // ---------------- CORDIC ----------------
-  logic               cs, cdone;
-  logic signed [23:0] cxo, cyo;
-  logic signed [31:0] cz;
-
-  cordic #(.DW(24)) u_rot (
-    .clk(clk), .rst(rst), .start(cs), .mode(1'b0),
-    .x_in(24'(pi_)), .y_in(24'(pq_)), .z_in(cz),
-    .done(cdone), .x_out(cxo), .y_out(cyo), .z_out()
-  );
 
   function automatic logic signed [15:0] sat16(input logic signed [39:0] a);
     if (a > 40'sd32767)  return 16'sd32767;
@@ -105,22 +71,54 @@ module sym_proc
     else                          return {2'b00, -16'(3*D1_QAM)};
   endfunction
 
-  logic signed [17:0] wi_k, wq_k;
-  assign wi_k = 18'(wai[k] >>> 14);
-  assign wq_k = 18'(waq[k] >>> 14);
+  // ======================= state =======================
+  logic signed [15:0] dli [D], dlq [D];
+  logic               dlt [D];
+  logic signed [15:0] pi_, pq_;
+  logic               ptag, a_go;
 
-  logic eq_upd;
-  assign eq_upd = eq_en && (hold == 0);
-
-  typedef enum logic [1:0] {A_IDLE, A_INIT, A_ROT, A_HAND} ast_t;
-  typedef enum logic [3:0] {B_IDLE, B_EQ, B_SL, B_DEC, B_PE, B_PE2, B_UPD, B_WU, B_ANC0, B_ANC} bst_t;
-  ast_t sa;
-  bst_t sb;
-  logic               xr_v;                    // derotated symbol waiting for stage B
-  logic signed [15:0] xr_i, xr_q;
-  logic               xr_t;
-  logic signed [31:0] dphi;                    // correction posted by B (applied next cycle)
+  logic signed [31:0] phi, frq;
+  logic signed [31:0] pend_phi, pend_f;
+  logic               pend_v;
+  logic [2:0]         hold;
+  logic signed [31:0] dphi;
   logic               dphi_v;
+
+  logic signed [15:0] xei [NT], xeq [NT];
+  logic               xet [NT];
+  logic signed [31:0] wai [NT], waq [NT];       // tap accumulators, 1.0 = 2^28
+
+  // ======================= stage A =======================
+  logic               init_now;
+  logic signed [31:0] phi_sym, f_sym;
+  assign init_now = a_go && ptag && pend_v;
+  assign phi_sym  = init_now ? pend_phi : phi;
+  assign f_sym    = init_now ? pend_f   : frq;
+
+  logic               cv, ctag;
+  logic signed [23:0] cxo, cyo;
+  cordic_pipe #(.DW(24)) u_rot (
+    .clk(clk), .rst(rst), .in_vld(a_go), .in_tag(ptag),
+    .x_in(24'(pi_)), .y_in(24'(pq_)), .z_in(-phi_sym),
+    .out_vld(cv), .out_tag(ctag), .x_out(cxo), .y_out(cyo)
+  );
+
+  // ======================= stage B pipeline signals =======================
+  logic [10:1]        bv;   // bv[k]: stage-k registers hold the current symbol
+  logic signed [33:0] pii [NT], pqq [NT], piq [NT], pqi [NT];
+  logic signed [35:0] yki [NT], ykq [NT];
+  logic signed [38:0] s01i, s01q, s23i, s23q, s4i, s4q;
+  logic signed [39:0] acc_i, acc_q;
+  logic signed [15:0] yi, yq, di, dq;
+  logic [3:0]         bt;
+  logic signed [33:0] pe0, pe1;
+  logic signed [31:0] inc_pr, inc_ir;
+  logic signed [17:0] th16;
+  logic signed [31:0] thw;
+  logic signed [33:0] g0 [NT], g1 [NT], g2 [NT], g3 [NT];
+  logic signed [35:0] ar [NT], br [NT];
+  logic signed [31:0] dwi [NT], dwq [NT];
+  logic               upd8, upd9, pll8, pll9;
 
   always_ff @(posedge clk) begin
     if (rst) begin
@@ -134,22 +132,19 @@ module sym_proc
       frq     <= '0;
       pend_v  <= 1'b0;
       hold    <= '0;
-      sa      <= A_IDLE;
-      sb      <= B_IDLE;
-      cs      <= 1'b0;
-      xr_v    <= 1'b0;
+      a_go    <= 1'b0;
+      bv      <= '0;
       out_vld <= 1'b0;
       dphi_v  <= 1'b0;
     end else begin
-      logic signed [31:0] phi_n;
-      cs      <= 1'b0;
+      a_go    <= 1'b0;
       out_vld <= 1'b0;
       dphi_v  <= 1'b0;
-      phi_n   = phi;
+      bv      <= {bv[9:1], cv};
 
-      // tag request from a preamble commit (not during a frame)
-      if (commit && !busy) begin
-        if (in_vld) dlt[3] <= 1'b1;   // shift happening this cycle
+      // ---------------- stage A ----------------
+      if (commit && !busy) begin           // tag preamble symbol 62 (index 2 after hdr0 push)
+        if (in_vld) dlt[3] <= 1'b1;
         else        dlt[2] <= 1'b1;
       end
       if (est_vld) begin
@@ -157,14 +152,6 @@ module sym_proc
         pend_f   <= est_freq;
         pend_v   <= 1'b1;
       end
-      if (!eq_en) begin
-        for (int n = 0; n < NT; n++) begin
-          wai[n] <= (n == CT) ? 32'sd1 <<< 28 : '0;
-          waq[n] <= '0;
-        end
-      end
-
-      // ======================= stage A =======================
       if (in_vld) begin
         dli[0] <= in_i; dlq[0] <= in_q; dlt[0] <= 1'b0;
         for (int n = 1; n < D; n++) begin
@@ -174,158 +161,121 @@ module sym_proc
         pi_  <= dli[D-1];
         pq_  <= dlq[D-1];
         ptag <= dlt[D-1];
+        a_go <= 1'b1;
       end
-      case (sa)
-        A_IDLE: if (in_vld) sa <= A_INIT;
-        A_INIT: begin
-          if (ptag && pend_v) begin
-            // data-aided acquisition: phase/frequency estimate valid for this symbol
-            cz     <= -pend_phi;
-            phi_n  = pend_phi;
-            frq    <= pend_f;
-            pend_v <= 1'b0;
-            hold   <= 3'd5;
-          end else begin
-            cz     <= -phi;
-          end
-          cs <= 1'b1;
-          sa <= A_ROT;
-        end
-        A_ROT: if (cdone) begin
-          xr_i  <= sat16(40'(cxo));
-          xr_q  <= sat16(40'(cyo));
-          xr_t  <= ptag;
-          phi_n = phi_n + frq;              // predicted phase of the next symbol
-          sa    <= A_HAND;
-        end
-        A_HAND: if (!xr_v) begin
-          xr_v <= 1'b1;
-          sa   <= A_IDLE;
-        end
-        default: sa <= A_IDLE;
-      endcase
-      if (dphi_v && !(sa == A_INIT && ptag && pend_v)) phi_n = phi_n + dphi;
-      phi <= phi_n;
+      begin
+        logic signed [31:0] phn;
+        phn = a_go ? phi_sym + f_sym : phi;        // advance to the next symbol's phase
+        if (dphi_v && !init_now) phn = phn + dphi;  // posted correction from stage B
+        phi <= phn;
+      end
+      if (init_now) begin
+        frq    <= pend_f;
+        pend_v <= 1'b0;
+        hold   <= 3'd5;
+      end
 
-      // ======================= stage B =======================
-      case (sb)
-        B_IDLE: if (xr_v) begin
-          xr_v   <= 1'b0;
-          xei[0] <= xr_i; xeq[0] <= xr_q; xet[0] <= xr_t;
-          for (int n = 1; n < NT; n++) begin
-            xei[n] <= xei[n-1]; xeq[n] <= xeq[n-1]; xet[n] <= xet[n-1];
-          end
-          acc_i <= '0;
-          acc_q <= '0;
-          k     <= '0;
-          sb    <= B_EQ;
+      // ---------------- stage B ----------------
+      // b0: equalizer delay line
+      if (cv) begin
+        xei[0] <= sat16(40'(cxo)); xeq[0] <= sat16(40'(cyo)); xet[0] <= ctag;
+        for (int n = 1; n < NT; n++) begin xei[n] <= xei[n-1]; xeq[n] <= xeq[n-1]; xet[n] <= xet[n-1]; end
+      end
+      // b1: tap products (registered DSPs)
+      for (int n = 0; n < NT; n++) begin
+        logic signed [17:0] wi, wq;
+        wi = 18'(wai[n] >>> 14);
+        wq = 18'(waq[n] >>> 14);
+        pii[n] <= 34'(wi * xei[n]); pqq[n] <= 34'(wq * xeq[n]);
+        piq[n] <= 34'(wi * xeq[n]); pqi[n] <= 34'(wq * xei[n]);
+      end
+      // b2: complex products
+      for (int n = 0; n < NT; n++) begin
+        yki[n] <= 36'(pii[n]) - 36'(pqq[n]);
+        ykq[n] <= 36'(piq[n]) + 36'(pqi[n]);
+      end
+      // b3, b4: sum
+      s01i <= 39'(yki[0]) + 39'(yki[1]); s01q <= 39'(ykq[0]) + 39'(ykq[1]);
+      s23i <= 39'(yki[2]) + 39'(yki[3]); s23q <= 39'(ykq[2]) + 39'(ykq[3]);
+      s4i  <= 39'(yki[4]);               s4q  <= 39'(ykq[4]);
+      acc_i <= 40'(s01i) + 40'(s23i) + 40'(s4i);
+      acc_q <= 40'(s01q) + 40'(s23q) + 40'(s4q);
+      // b5: y
+      yi <= sat16(acc_i >>> 14);
+      yq <= sat16(acc_q >>> 14);
+      // b6: slicer (y valid at bv[6])
+      if (bv[6]) begin
+        if (mod16) begin
+          logic [17:0] si, sq;
+          si = qam_slice(yi);
+          sq = qam_slice(yq);
+          di <= si[15:0];
+          dq <= sq[15:0];
+          bt <= {si[17:16], sq[17:16]};
+        end else begin
+          di <= yi[15] ? -16'sd8192 : 16'sd8192;
+          dq <= yq[15] ? -16'sd8192 : 16'sd8192;
+          bt <= {2'b00, ~yi[15], ~yq[15]};
         end
-        B_EQ: begin
-          // y += w_k * x_k : products registered at k, accumulated at k+1
-          if (k < 3'(NT)) begin
-            m0 <= 34'(wi_k * xei[k]); m1 <= 34'(wq_k * xeq[k]);
-            m2 <= 34'(wi_k * xeq[k]); m3 <= 34'(wq_k * xei[k]);
+      end
+      // b7: phase-detector products, error, outputs, anchoring angle
+      if (bv[7]) begin
+        pe0     <= 34'(yq * di);                     // Im{y d^*} = yq*di - yi*dq
+        pe1     <= 34'(yi * dq);
+        out_vld <= 1'b1;
+        out_tag <= xet[CT];
+        y_i     <= yi;
+        y_q     <= yq;
+        e_i     <= 17'(di) - 17'(yi);
+        e_q     <= 17'(dq) - 17'(yq);
+        bits    <= bt;
+        dbit    <= ($signed(17'(yi) + 17'(yq)) >= 0);
+        th16    <= 18'(waq[CT] >>> 12);                                     // theta * 2^16
+        thw     <= (waq[CT] <<< 1) + (waq[CT] >>> 1) + (waq[CT] >>> 4);     // theta*2^32/2pi
+        upd8    <= eq_en && (hold == 0);
+        pll8    <= pll_en && (hold == 0);
+        if (hold != 0) hold <= hold - 3'd1;
+      end
+      // b8: PLL increments; LMS + anchoring products (all taps in parallel)
+      begin
+        logic signed [31:0] pe_s;
+        pe_s   = 32'((pe0 - pe1) >>> 16);
+        inc_pr <= (pe_s <<< 16) >>> pll_kp_sh;
+        inc_ir <= (pe_s <<< 16) >>> pll_ki_sh;
+      end
+      for (int n = 0; n < NT; n++) begin
+        g0[n] <= 34'(e_i * xei[n]); g1[n] <= 34'(e_q * xeq[n]);
+        g2[n] <= 34'(e_q * xei[n]); g3[n] <= 34'(e_i * xeq[n]);
+        ar[n] <= 36'(18'(wai[n] >>> 14) * th16);
+        br[n] <= 36'(18'(waq[n] >>> 14) * th16);
+      end
+      upd9 <= upd8;
+      pll9 <= pll8;
+      // b9: tap increments = mu * e * conj(x) + w * (-j*theta)
+      for (int n = 0; n < NT; n++) begin
+        dwi[n] <= 32'((g0[n] + g1[n]) >>> eq_mu_sh) + 32'(br[n] >>> 2);
+        dwq[n] <= 32'((g2[n] - g3[n]) >>> eq_mu_sh) - 32'(ar[n] >>> 2);
+      end
+      // b10: commit taps, frequency and phase corrections
+      if (bv[10]) begin
+        if (upd9) begin
+          for (int n = 0; n < NT; n++) begin
+            wai[n] <= sadd32(wai[n], dwi[n]);
+            waq[n] <= sadd32(waq[n], dwq[n]);
           end
-          if (k != 0) begin
-            acc_i <= acc_i + 40'(m0) - 40'(m1);
-            acc_q <= acc_q + 40'(m2) + 40'(m3);
-          end
-          k <= k + 3'd1;
-          if (k == 3'(NT)) sb <= B_SL;
         end
-        B_SL: begin
-          yi <= sat16(acc_i >>> 14);
-          yq <= sat16(acc_q >>> 14);
-          sb <= B_DEC;
-        end
-        B_DEC: begin
-          if (mod16) begin
-            logic [17:0] si, sq;
-            si = qam_slice(yi);
-            sq = qam_slice(yq);
-            di <= si[15:0];
-            dq <= sq[15:0];
-            bt <= {si[17:16], sq[17:16]};
-          end else begin
-            di <= yi[15] ? -16'sd8192 : 16'sd8192;
-            dq <= yq[15] ? -16'sd8192 : 16'sd8192;
-            bt <= {2'b00, ~yi[15], ~yq[15]};
-          end
-          sb <= B_PE;
-        end
-        B_PE: begin
-          m0 <= 34'(yq * di);                         // Im{y d^*} = yq*di - yi*dq
-          m1 <= 34'(yi * dq);
-          sb <= B_PE2;
-        end
-        B_PE2: begin
-          logic signed [31:0] pe_s;
-          pe_s   = 32'((m0 - m1) >>> 16);
-          inc_pr <= (pe_s <<< 16) >>> pll_kp_sh;
-          inc_ir <= (pe_s <<< 16) >>> pll_ki_sh;
-          sb <= B_UPD;
-        end
-        B_UPD: begin
-          if (pll_en && hold == 0) begin
-            frq    <= frq + inc_ir;
-            dphi   <= inc_ir + inc_pr;
-            dphi_v <= 1'b1;
-          end
-          // outputs (symbol at the equalizer centre)
-          out_vld <= 1'b1;
-          out_tag <= xet[CT];
-          y_i     <= yi;
-          y_q     <= yq;
-          e_i     <= 17'(di) - 17'(yi);
-          e_q     <= 17'(dq) - 17'(yq);
-          bits    <= bt;
-          dbit    <= ($signed(17'(yi) + 17'(yq)) >= 0);
-          k       <= '0;
-          sb      <= eq_upd ? B_WU : B_IDLE;
-          if (hold != 0) hold <= hold - 3'd1;
-        end
-        B_WU: begin
-          // w_k += mu * e * conj(x_k): products at k, gradient at k+1, tap update at k+2
-          if (k < 3'(NT)) begin
-            m0 <= 34'(e_i * xei[k]); m1 <= 34'(e_q * xeq[k]);
-            m2 <= 34'(e_q * xei[k]); m3 <= 34'(e_i * xeq[k]);
-          end
-          if (k >= 3'd1 && k <= 3'(NT)) begin
-            gr_r <= 32'((m0 + m1) >>> eq_mu_sh);
-            gi_r <= 32'((m2 - m3) >>> eq_mu_sh);
-          end
-          if (k >= 3'd2) begin
-            wai[k-2] <= sadd32(wai[k-2], gr_r);
-            waq[k-2] <= sadd32(waq[k-2], gi_r);
-          end
-          k <= k + 3'd1;
-          if (k == 3'(NT+1)) sb <= B_ANC0;
-        end
-        // Phase anchoring: move the centre-tap angle theta ~= Im(w_c)/Re(w_c) into the PLL and
-        // counter-rotate all taps. Keeps the taps phase-neutral so the k*90deg DD ambiguity lives
-        // only in the PLL phase, which the preamble estimate overwrites.
-        B_ANC0: begin
-          th16   <= 18'(waq[CT] >>> 12);                                    // theta * 2^16
-          dphi   <= -((waq[CT] <<< 1) + (waq[CT] >>> 1) + (waq[CT] >>> 4)); // theta*2^32/2pi
+        if (pll9 || upd9) begin
+          dphi   <= (pll9 ? inc_ir + inc_pr : 32'sd0) - (upd9 ? thw : 32'sd0);
           dphi_v <= 1'b1;
-          k      <= '0;
-          sb     <= B_ANC;
         end
-        B_ANC: begin
-          // w_k <- w_k * (1 - j*theta): products at k (on w>>>14, one DSP), update at k+1
-          if (k < 3'(NT)) begin
-            a_r <= 36'(18'(wai[k] >>> 14) * th16);
-            b_r <= 36'(18'(waq[k] >>> 14) * th16);
-          end
-          if (k != 0) begin
-            wai[k-1] <= sadd32(wai[k-1], 32'(b_r >>> 2));
-            waq[k-1] <= sadd32(waq[k-1], -32'(a_r >>> 2));
-          end
-          k <= k + 3'd1;
-          if (k == 3'(NT)) sb <= B_IDLE;
+        if (pll9 && !init_now) frq <= frq + inc_ir;
+      end
+      if (!eq_en) begin
+        for (int n = 0; n < NT; n++) begin
+          wai[n] <= (n == CT) ? 32'sd1 <<< 28 : '0;
+          waq[n] <= '0;
         end
-        default: sb <= B_IDLE;
-      endcase
+      end
     end
   end
 
@@ -333,9 +283,8 @@ module sym_proc
   assign pll_phase = phi;
 
 `ifndef SYNTHESIS
-  always @(posedge clk) if (!rst && in_vld && sa != A_IDLE)
-    $error("sym_proc overrun: new input before stage A finished");
-  always @(posedge clk) if (!rst && sa == A_HAND && cdone)
-    $error("sym_proc: stage B did not consume previous symbol in time");
+  // stage B must finish (b10) before the next symbol reaches b1
+  always @(posedge clk) if (!rst && cv && |bv[9:1])
+    $error("sym_proc overrun: symbols closer than the 11-clock stage-B pipeline");
 `endif
 endmodule

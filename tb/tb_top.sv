@@ -64,7 +64,7 @@ module tb_top;
   real bi [NB], bq [NB];
   int  wp = 0;
   real ph = 0.0, pavg = 0.0, sigma = 0.0, aph = 0.0;
-  real ACI = -300.0, ACI_OFF = 1.0e6;
+  real ACI = -300.0, ACI_OFF = 1.0e6, DLY0 = 2000.0;
   int  DACDUMP = 0, dfd = 0, dcnt = 0;
   longint n = 0;
   real mp_d, mp_ai, mp_aq;
@@ -102,7 +102,7 @@ module tb_top;
     // power tracker on transmitted signal (for Es/N0 calibration)
     pavg = pavg + ((xi * xi + xq * xq) - pavg) / 65536.0;
     // delay with sample-rate offset
-    d = 2000.0 + real'(n) * SRO * 1e-6;     // +-1800 samples of drift headroom
+    d = DLY0 + real'(n) * SRO * 1e-6;       // +-1800 samples of drift headroom
     if (d < 4.0 || d > real'(NB) - 400.0) $fatal(1, "channel delay out of range");
     rd_buf(d, yi, yq);
     if (MP != 0) begin
@@ -151,6 +151,7 @@ module tb_top;
       warm = 1500;
       void'($value$plusargs("WARM=%d", warm));
       repeat (warm * 8 * R) @(posedge clk);
+      if ($test$plusargs("TEDFREEZE")) axil_wr(8'h20, 32'h1F1F);   // freeze timing loop after lock
     end
     if (TEST != 0) begin
       axil_wr(8'h08, 32'h63 | (MOD << 7) | (LPBK << 3) | 32'h4);   // enable test generator now
@@ -225,11 +226,35 @@ module tb_top;
     if (DBG > 2 && dut.u_det.cdone) $display("   det cordic in=(%0d,%0d) z=%.1f deg  out=(%0d,%0d) est=%0d", dut.u_det.cx, dut.u_det.cy, real'($signed(dut.u_det.czo))/11930464.7, dut.u_det.cxo, dut.u_det.cyo, dut.u_det.est);
     if (DBG > 2 && dut.commit) for (int k=0;k<4;k++) $display("   C%0d = (%0d,%0d) ang %.1f", k, dut.u_det.cand_ci[k], dut.u_det.cand_cq[k], $atan2(real'(dut.u_det.cand_cq[k]),real'(dut.u_det.cand_ci[k]))*57.2958);
     if (dut.est_vld) $display("[%0t] est phase=%0d deg freq=%0d deg/sym", $time, $signed(dut.est_phase)/11930465, $signed(dut.est_freq)/11930465);
-    if (DBG > 1 && dut.u_sym.cdone && (dut.u_sym.ptag || dut.u_deframer.st == 2 || dut.u_deframer.st == 1))
-      $display("   rot tag=%0d df=%0d ang=%.0f  in_ang=%.0f phi=%.0f", dut.u_sym.ptag, dut.u_deframer.st,
-        $atan2(real'(dut.u_sym.cyo), real'(dut.u_sym.cxo))*57.3, $atan2(real'(dut.u_sym.pq_), real'(dut.u_sym.pi_))*57.3,
-        real'($signed(dut.u_sym.phi))/11930465.0);
+    if (DBG > 1 && dut.u_sym.cv && (dut.u_sym.ctag || dut.u_deframer.st == 2 || dut.u_deframer.st == 1))
+      $display("   rot tag=%0d df=%0d ang=%.0f phi=%.0f", dut.u_sym.ctag, dut.u_deframer.st,
+        $atan2(real'(dut.u_sym.cyo), real'(dut.u_sym.cxo))*57.3, real'($signed(dut.u_sym.phi))/11930465.0);
     if (dut.u_deframer.st == 2 && dut.u_deframer.hcnt == 32) $display("[%0t] hdr=%08x", $time, dut.u_deframer.hdr);
+  end
+
+  // on-time interpolation phase statistics (DBG=9)
+  real mu_sum = 0, v_sum = 0, v_sq = 0; int mu_n = 0, mu_lo = 0, mu_hi = 0;
+  always @(posedge clk) if (DBG == 9 && dut.u_ted.fv[7] && dut.u_ted.ontime && n > 300000) begin
+    mu_sum += real'(dut.u_ted.mu[7]) / 65536.0; mu_n++;
+    if (real'(dut.u_ted.mu[7]) / 65536.0 < 0.1) mu_lo++;
+    if (real'(dut.u_ted.mu[7]) / 65536.0 > 0.9) mu_hi++;
+    v_sum += real'($signed(dut.u_ted.v)); v_sq += real'($signed(dut.u_ted.v))**2;
+  end
+  final if (DBG == 9) $display("on-time mu mean %.3f over %0d  (<0.1: %0d, >0.9: %0d)  v mean %.0f rms %.0f (2^24 = 1 sample)", mu_sum / mu_n, mu_n, mu_lo, mu_hi, v_sum/mu_n, $sqrt(v_sq/mu_n));
+
+  // timing-recovery output with its interpolation phase (DBG=9)
+  int mfd = 0, ffd = 0;
+  logic [80:0] cap_q [$];
+  always @(posedge clk) if (DBG == 9 && n > 300000) begin
+    if (mfd == 0) begin mfd = $fopen("ted.txt", "w"); ffd = $fopen("farrow.txt", "w"); end
+    if (dut.u_ted.fv[8] && dut.u_ted.ontime)
+      $fwrite(mfd, "%0d %0d %0d\n", dut.u_ted.mu[7], $signed(dut.u_ted.yi), $signed(dut.u_ted.yq));
+    if (dut.u_ted.s_v) cap_q.push_back({dut.u_ted.mu0, dut.u_ted.sm1i, dut.u_ted.s0i, dut.u_ted.s1i, dut.u_ted.s2i});
+    if (dut.u_ted.fv[8]) begin
+      logic [80:0] c;
+      c = cap_q.pop_front();
+      $fwrite(ffd, "%0d %0d %0d %0d %0d %0d\n", c[80:64], $signed(c[63:48]), $signed(c[47:32]), $signed(c[31:16]), $signed(c[15:0]), $signed(dut.u_ted.yi));
+    end
   end
 
   // ---------------- symbol dump ----------------
@@ -260,6 +285,7 @@ module tb_top;
     void'($value$plusargs("ACI=%f", ACI));
     void'($value$plusargs("ACI_OFF=%f", ACI_OFF));
     void'($value$plusargs("DACDUMP=%d", DACDUMP));
+    void'($value$plusargs("DLY0=%f", DLY0));
     void'($urandom(SEED));
     mp_d  = 4.0 * real'(R);                // echo at 0.5 symbol
     mp_ai = 0.25 * $cos(0.7);

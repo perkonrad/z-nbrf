@@ -25,7 +25,7 @@ module axil_regs
   input  logic        s_axi_rready,
   // control outputs
   output logic [31:0] ctrl,
-  output logic [5:0]  rate,
+  output logic [6:0]  rate,
   output logic [5:0]  rx_shift,
   output logic [5:0]  tx_shift,
   output logic [15:0] tx_gain,
@@ -57,7 +57,7 @@ module axil_regs
 );
   logic [31:0] r_rate, r_shift, r_txg, r_test, r_agc, r_ted, r_pll, r_eq, r_det;
 
-  assign rate       = r_rate[5:0];
+  assign rate       = r_rate[6:0];
   assign rx_shift   = r_shift[5:0];
   assign tx_shift   = r_shift[13:8];
   assign tx_gain    = r_txg[15:0];
@@ -97,7 +97,7 @@ module axil_regs
       r_txg   <= 32'h4000;                // 1.0 (Q2.14)
       r_test  <= {16'd32, 4'd0, 12'd64};
       r_agc   <= {11'd0, 5'd9, 16'd11650};   // calibrated: QPSK symbols at +-8192 after timing recovery
-      r_ted   <= {19'd0, 5'd10, 3'd0, 5'd3};
+      r_ted   <= {19'd0, 5'd11, 3'd0, 5'd4};   // Kp>>4, Ki>>11 (Kp>>3 jitters at the mu wrap)
       r_pll   <= {19'd0, 5'd10, 3'd0, 5'd3};
       r_eq    <= 32'd6;
       r_det   <= 32'd102;                 // rho >= 0.4
