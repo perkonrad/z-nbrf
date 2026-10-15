@@ -10,7 +10,7 @@ if [[ ! -x $OBJ/Vtb_top || -n "${REBUILD:-}" || -n "$(find rtl tb -name "*.sv" -
     --top-module tb_top -Mdir $OBJ -Irtl \
     rtl/nb_pkg.sv rtl/nb_coefs_pkg.sv rtl/cordic.sv rtl/fir_cplx.sv rtl/cic_dec.sv rtl/cic_int.sv \
     rtl/agc.sv rtl/timing_rec.sv rtl/preamble_det.sv rtl/sym_proc.sv rtl/deframer.sv \
-    rtl/tx_framer.sv rtl/sync_fifo.sv rtl/axil_regs.sv rtl/nb_radio_top.sv tb/tb_top.sv \
+    rtl/tx_framer.sv rtl/sync_fifo.sv rtl/axil_regs.sv rtl/nco_mix.sv rtl/nb_radio_top.sv tb/tb_top.sv \
     > build/verilator.log 2>&1 || { tail -40 build/verilator.log; exit 1; }
 fi
 mkdir -p build/run && cd build/run

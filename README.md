@@ -8,7 +8,7 @@ Packets move to and from the A53s over AXI DMA.
 | | |
 |---|---|
 | Converters | RF-ADC tile 224 ch0 @ 2.56 GSPS / RF-DAC tile 228 ch0 @ 5.12 GSPS, IQ, x8 DDC/DUC with 48-bit NCO |
-| RF channels | **2402 + n MHz** (default grid; any carrier the converters reach) — tuned by the RFDC NCOs, see §2a |
+| RF channels | **2402 + n MHz** (default grid) — fabric NCOs around a fixed RFDC centre of 2441 MHz, selected by a **direct `chan_i`/`chan_stb_i` port** or a register, see §2a |
 | Fabric | one 320 MHz clock domain; 1 complex sample/clk from the ADC, 2 samples/clk to the DAC |
 | Channel BW | R = 8…63 → Rs = 40/R MBd → BW = Rs·1.25 = **50/R MHz** (6.25 … 5.00 (R = 10) … 1.00 (R = 50) … 0.79 MHz) |
 | Pulse shaping | RRC α = 0.25, 41 taps (10 symbols) TX and RX |
@@ -16,8 +16,8 @@ Packets move to and from the A53s over AXI DMA.
 | Throughput | 4 MBd × 4 b = 16 Mb/s raw at 5 MHz/16-QAM; 1.6 Mb/s at 1 MHz/QPSK |
 | RX sensitivity | payload BER within ~0.5–1 dB of theory (uncoded), see below |
 | Acquisition | CFO ±Rs/36 (±110 kHz @ 5 MHz, ±22 kHz @ 1 MHz) from a single 64-symbol preamble |
-| Verified | 23-case end-to-end RTL regression + BER sweep in Verilator (TX → impaired channel → RX); Yosys UltraScale+ synthesis |
-| Resources | ~19k LUT, ~31k FF, 299 DSP48E2, 2 RAMB36 (≈5% of the ZU28DR) |
+| Verified | 27-case end-to-end RTL regression + BER sweep in Verilator (TX → impaired channel → RX); Yosys UltraScale+ synthesis |
+| Resources | ~19k LUT, ~31k FF, ~311 DSP48E2, ~3.5 RAMB36 (≈5% of the ZU28DR; the fabric NCOs add ~12 DSP and 3 RAMB18, estimated) |
 
 ---
 
@@ -25,11 +25,11 @@ Packets move to and from the A53s over AXI DMA.
 
 ```
                          320 MHz (RFDC clk_adc0 -> BUFG)
- TX  AXIS bytes ─► tx_framer ─► mapper ─► RRC x4 ─► CFIR x2 ─► CIC xR ─► gain ─► RF-DAC (IQ, DUC x8, NCO)
+ TX  AXIS bytes ─► tx_framer ─► mapper ─► RRC x4 ─► CFIR x2 ─► CIC xR ─► gain ─► x2 ─► NCO ─► RF-DAC (IQ, DUC x8, NCO)
      (DMA MM2S)    4 KB pkt buf   1 sps    4 sps     8 sps     320 MSPS
                    CRC16, PRBS15
 
- RX  RF-ADC (IQ, DDC /8, NCO) ─► CIC /R ─► CFIR /2 ─► RRC ─► AGC ─► Farrow+Gardner ─┬─► preamble_det ──┐
+ RX  RF-ADC (IQ, DDC /8, NCO) ─► NCO ─► CIC /R ─► CFIR /2 ─► RRC ─► AGC ─► Farrow+Gardner ─┬─► preamble_det ──┐
                        320 MSPS      8 sps     4 sps      4 sps   4 sps     1 sps       │  (rho, w, phi)    │ commit/est
                                                                                       └─► sym_proc ◄──────┘
                                                                                           A: delay line + CORDIC derotator
@@ -69,30 +69,48 @@ simulation assertions check.
 | `sym_proc` | Stage A: 4-deep alignment line + CORDIC derotator (owns φ). Stage B: 5-tap T-spaced complex DD-LMS EQ, QPSK/16-QAM slicer, 2nd-order DD PLL | Phase anchoring keeps the EQ phase-neutral (see §3) |
 | `deframer` | Header (CRC-8) → payload demap → PRBS15 descramble → CRC-16 | EVM accumulator over the payload |
 | `tx_framer` | Packet buffer (BRAM), CRC-16, scrambler, preamble/header/payload, PRBS-23 idle fill | Internal test generator for bring-up |
+| `nco_mix` | Complex mixer, 1024 × 18-bit quarter-wave sine ROM (12-bit phase) | Channel offset ±39 MHz; spurs ≈ −72 dBc; 6-clock latency; one per DAC lane + one on the ADC |
 | `axil_regs` | AXI4-Lite register file | Radio clock domain (SmartConnect does the CDC) |
 
 ## 2a. Channel selection: 2402 + n MHz
 
-The modem always works at complex baseband. **A channel is selected only by the RFDC NCOs**
-(48-bit, mHz resolution), and every frame carries its own preamble, so hopping needs no modem
-reset. Retuning takes one AXI write per converter plus an RFDC mixer update event.
+The RFDC NCOs are set once to a fixed centre, 2441 MHz. A fabric NCO on each side
+(`nco_mix`) moves the modem to `NCO_BASE + chan·NCO_STEP`, which defaults to 2402 + chan MHz,
+i.e. ±39 MHz around the centre. Every frame carries its own preamble, so hopping needs no modem
+reset, and the NCO phase stays continuous across a hop.
+
+**Direct control, no AXI.** The modem has a channel port:
+
+| Port | Dir | Meaning |
+|---|---|---|
+| `chan_i[6:0]` | in | channel number |
+| `chan_stb_i` | in | `chan_i` is taken on each rising edge. Synchronised inside (2 flops), so it can come from any clock domain or from pins. Hold `chan_i` stable from before the edge until 3 radio clocks after it |
+| `tx_busy_o` | out | a TX frame is loading, queued or still in the filters (16-symbol tail) |
+| `rx_busy_o` | out | the RX is inside a frame (preamble commit to last byte) |
+
+The new channel is on air about 8 radio clocks (25 ns) after the strobe edge. A half-duplex
+hopper waits for `!tx_busy_o && !rx_busy_o`, strobes the next channel, then sends. `bd.tcl`
+ties the port off by default (`CHAN_PORT tie`); set `CHAN_PORT external` to bring it to the
+block-design boundary for your own logic. Software can still pick a channel over AXI (the
+`CHAN` register); whichever was written last wins.
 
 ```python
 ol = NbRadioOverlay("nb_radio.bit")
 ol.radio.configure(bw_mhz=1.0, mod="qpsk")   # 1 MHz grid -> R = 50
-ol.set_channel(n)                            # 2402 + n MHz, n = 0..78
+ol.set_channel(n)                            # 2402 + n MHz, n = 0..78 (CHAN register)
 ol.set_channel(k, base=2402, spacing=2)      # any other grid, e.g. 2 MHz spacing
+ol.radio.set_rx_trim(cfo_hz)                 # software AFC on the RX NCO
 ```
 
 **Frequency plan at 2.4 GHz**
 
 | | Sample rate | Nyquist zone at 2402–2480 MHz | NCO value (driver computes) |
 |---|---|---|---|
-| RF-ADC | 2.56 GSPS | 2 (even) — undersampled | −158 … −80 MHz |
-| RF-DAC | 5.12 GSPS | 1 — normal mode | +2402 … +2480 MHz |
+| RF-ADC | 2.56 GSPS | 2 (even) — undersampled | −119 MHz (centre 2441 MHz) |
+| RF-DAC | 5.12 GSPS | 1 — normal mode | +2441 MHz |
 
-The NCO is the RF frequency folded into (−Fs/2, Fs/2]. That folding never inverts the
-spectrum, in any zone. At 5.12 GSPS the whole band sits in the DAC's first Nyquist zone, so no
+The RFDC NCO is the centre frequency folded into (−Fs/2, Fs/2]. That folding never inverts the
+spectrum, in any zone. The DDC/DUC passband (±0.4 × 320 MHz) easily holds ±39 MHz of channels. At 5.12 GSPS the whole band sits in the DAC's first Nyquist zone, so no
 mix-mode is needed. The fabric feeds it 2 samples/clk through a ×2 linear interpolator; its
 images are measured below −95 dBc. Both tile PLLs run the VCO at 10.24 GHz from the stock
 409.6 MHz reference (ADC ÷4, DAC ÷2). The ADC does plain bandpass sampling in zone 2.
@@ -119,7 +137,7 @@ high-frequency (1–4 GHz) baluns.
 
 **Two boards over the air:** acquisition covers ±Rs/36, which is ±22 kHz at 1 MHz, i.e.
 ±9 ppm at 2.44 GHz. Either lock both boards to a common 10 MHz reference via the LMK input on
-the ZCU111, or use software AFC: `set_carrier(..., rx_offset_hz=cfo)` trims the RX NCO from
+the ZCU111, or use software AFC: `radio.set_rx_trim(cfo)` moves the RX fabric NCO by
 `status()['cfo_hz']`.
 
 ## 2. Frame format
@@ -176,6 +194,10 @@ the ZCU111, or use software AFC: `set_carrier(..., rx_offset_hz=cfo)` trims the 
 | 0x20 / 0x24 | TED / PLL | [4:0] Kp shift · [12:8] Ki shift (defaults 3 / 10) |
 | 0x28 | EQ | [4:0] LMS μ shift (6) |
 | 0x2C | DET | [7:0] ρ threshold ×256 (102 = 0.4) |
+| 0x30 | CHAN | W: [6:0] select channel (same effect as the port). R: [6:0] channel · [8] tx_busy · [9] rx_busy |
+| 0x34 | NCO_BASE | s32 fabric NCO increment of channel 0, f/320 MHz·2³² (default −39 MHz) |
+| 0x38 | NCO_STEP | s32 increment per channel (default 1 MHz = 13421773) |
+| 0x3C | RX_TRIM | s32 added to the RX increment (software AFC) |
 | 0x40–0x4C | RX_OK, RX_CRC_ERR, RX_HDR_ERR, TX_FRAMES | counters |
 | 0x50 | RX_OVF | bytes dropped (RX FIFO full) |
 | 0x54 | PLL_FREQ | s32; CFO [Hz] = v/2³²·Rs |
@@ -192,11 +214,11 @@ register math (`configure(bw_mhz=…, mod=…)`, `send()`, `recv()`, `status()` 
 
 Everything below is RTL simulation (Verilator 5). The testbench (`tb/tb_top.sv`) drives
 DMA-style packets into TX. A 320 MSPS complex channel model then applies sample-rate offset
-with fractional delay, a two-path echo (0.25∠40° at ½ symbol), CFO, AWGN at a set Es/N0 and
+with fractional delay (cubic Lagrange), a two-path echo (0.25∠40° at ½ symbol), CFO, AWGN at a set Es/N0 and
 12-bit ADC quantisation. The model feeds RX, and every payload byte is checked.
 
 ```
-tb/regress.sh                 # 23 cases, ~8 min
+tb/regress.sh                 # 27 cases, ~10 min
 python3 scripts/ber_sweep.py  # BER vs Es/N0, 5 MHz and 1 MHz channels
 tb/run.sh +R=16 +MOD=1 +ESN0=20 +CFO=30000 +SRO=20 +MP=1 +NPKT=20   # any single scenario
 ```
@@ -214,6 +236,9 @@ tb/run.sh +R=16 +MOD=1 +ESN0=20 +CFO=30000 +SRO=20 +MP=1 +NPKT=20   # any single
 | 5 MHz 16-QAM @ 22 dB, all impairments | 0 bit errors |
 | 1 MHz QPSK @ 12 dB, all impairments | 0 bit errors |
 | CFO +100 kHz / −110 kHz @ 5 MHz, −22 kHz @ 1 MHz | pass (edge of ±Rs/36) |
+| Channel 78 (+39 MHz NCO offset), 16-QAM | 0 bit errors, MER 33 dB |
+| Hopping through the channel port between frames (steps of 37 and 29 channels), 5 MHz 16-QAM with echo + CFO + SRO, 1 MHz QPSK | pass |
+| RX trim sign: +5 MHz CFO with +5 MHz `RX_TRIM` | pass (and fails with −5 MHz, as it should) |
 
 ![BER](docs/ber.png)
 
@@ -265,6 +290,8 @@ The resource estimate for the modem alone (Vivado usually comes in lower on LUTs
 | LUT | FF | DSP48E2 | RAMB36 |
 |---|---|---|---|
 | ~18.8k (4.4%) | ~31.2k (3.7%) | 299 (7.0%) | 2 (0.2%) |
+
+That Yosys run predates the fabric NCOs (three `nco_mix`: ~12 DSP48E2 and 3 RAMB18 more by count).
 
 The four parallel FIRs account for most of the DSPs (2 × (41 + 23) × 2 = 256); folding the
 symmetric taps would halve that if it ever matters.

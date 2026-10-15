@@ -44,6 +44,10 @@ Read this before changing anything structural.
 | NCO value | RF frequency folded into (−Fs/2, Fs/2] | Never inverts the spectrum, in any zone |
 | 1 MHz grid BW | R = 50 (1.00 MHz) or R = 60 (0.83 MHz) | R = 60 trades 17% throughput for ~5 dB more ACR |
 | AGC | Multiplicative update, gain range 1/256…1024 | Backing the ADC off for neighbour headroom needs gain ~50–600; the linear-step AGC took >9k symbols to get there |
+| Channel select (2026-10-15) | RFDC NCOs fixed at 2441 MHz; fabric NCO (`nco_mix`) per DAC lane and on the ADC; channel from the `chan_i`/`chan_stb_i` port or the CHAN register | Asked for direct channel control, not through AXI. The RFDC Gen1 mixer can only be retuned over AXI-Lite plus an update event; a fabric NCO hops in ~8 clocks from a plain port |
+| TX NCO placement | After the ×2 linear interpolator, one mixer per DAC lane | Mixing before the interpolator would leave its image at −29 dBc for a 39 MHz offset; after it, −86 dBc measured |
+| NCO quality | 1024 × 18-bit quarter-wave ROM with a half-sample offset, 12-bit phase | Exact quadrant mirroring; phase-truncation spurs ≈ −72 dBc, well below the 12-bit ADC and the modem's MER |
+| Hop handshake | `tx_busy_o` (frame loading/queued/on air + 16-symbol filter tail), `rx_busy_o` (deframer active) | A hopper must not retune mid-frame; the modem can't know when the far end is done, so it only reports its own state |
 
 ## Bugs found by verification (all fixed, all covered by regression)
 
@@ -60,13 +64,16 @@ Read this before changing anything structural.
 | (TB) SRO runs failed at R = 40 | Channel delay went negative → stale buffer reads | Centred delay with ±1800-sample headroom, `$fatal` on overrun |
 | (TB) Every case hung in the first register write on Verilator 5.048 | The AXI-Lite BFM drove and sampled handshakes right after `@(posedge clk)`, which races the DUT's flops under `--timing` | BFM and packet source drive and sample on the falling edge |
 | (docs) Bring-up guide said a wrong RX NCO sign gives no detections | On a real-input ADC a wrong NCO sign conjugates the signal; detection and the BPSK-diagonal header survive, only the payload CRC fails (`+INV=1`, `+IQSWAP=1`) | README §7 and `loopback_test.py` corrected |
+| First frame after a hop lost with multipath (16-QAM, 30 dB) | The EQ kept taps converged to the old channel's echo phase | EQ held at identity for 64 clocks on every channel change |
+| (TB) Off-centre channels degraded by the channel model | Linear fractional-delay interpolation is −23 dB accurate for a signal 39 MHz off DC | Cubic Lagrange interpolation |
 
 ## Verification status
 
-* `tb/regress.sh`: 23 end-to-end cases pass at 320 MHz (Verilator 5.048) (`docs/results/regress.log`).
+* `tb/regress.sh`: 27 end-to-end cases pass at 320 MHz (Verilator 5.048) (`docs/results/regress.log`).
 * BER within ~0.5–1 dB of theory for QPSK and 16-QAM at 5 MHz and 1 MHz (`docs/ber.png`, `docs/results/ber.json`; measured at the earlier 256 MHz clock, R = 8/40, the same 5/1 MHz channels).
 * Yosys `synth_xilinx -family xcup`: ~19k LUT, ~31k FF, 299 DSP48E2, 2 RAMB36 (before the ×2 DAC interpolator, which adds a few hundred FFs).
-* **Not done:** Vivado run of `bd.tcl` and `build.tcl`, 320 MHz timing closure, hardware bring-up.
+* Channel port and fabric NCOs: TB drives the port like an external controller; hopping by 29/37 channels between frames, channel 78, and the RX trim sign (`+CFO=5e6 +TRIM=5e6` passes, `-5e6` fails) are in the regression. DAC dump at channel 78: interpolator image −86 dBc, mirror −101 dBc.
+* **Not done:** Vivado run of `bd.tcl` and `build.tcl`, 320 MHz timing closure, hardware bring-up, slang re-check after the NCO change.
 
 ## Open items
 

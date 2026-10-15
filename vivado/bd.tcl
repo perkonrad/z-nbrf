@@ -8,8 +8,9 @@
 #   RF-ADC tile 224 ch0 (2.56 GSPS, IQ, /8, NCO, 2nd-Nyquist undersampling at 2.4 GHz)
 #                                       --> nb_radio RX --> async AXIS FIFO --> AXI DMA S2MM
 #
-# 2.4 GHz channel plan (2402 + n MHz): ADC alias = wrap(f, 2560) = -158+n MHz (zone 2, even),
-# DAC NCO = wrap(f, 5120) = +2402+n MHz (zone 1, normal mode). Runtime retuning: sw/nb_radio.py.
+# 2.4 GHz channel plan (2402 + n MHz): the RFDC NCOs sit at a fixed centre (2441 MHz: ADC alias
+# wrap(f, 2560) = -119 MHz in zone 2, DAC 2441 MHz in zone 1); the modem's fabric NCOs pick the
+# channel within +-39 MHz from its chan_i/chan_stb_i port or its CHAN register.
 #   Radio clock: RFDC clk_adc0 (320 MHz) -> BUFG -> m0/s0_axis_aclk + nb_radio
 #
 # RFDC configuration: ADC 2.56 GSPS, DAC 5.12 GSPS, tile PLLs from a 409.6 MHz reference
@@ -25,7 +26,9 @@ set ADC_FS_GSPS  2.56       ;# RF-ADC sample rate  (AXIS = 2560/8 = 320 MSPS, 1 
 set DAC_FS_GSPS  5.12       ;# RF-DAC sample rate  (AXIS = 5120/8 = 640 MSPS, 2 samples/clk)
 set REFCLK_MHZ   409.600    ;# RFDC tile PLL reference
 set AXIS_MHZ     320.000    ;# fabric / AXI4-Stream clock
-set CHANNEL_MHZ  2402.0     ;# power-up channel (2402 + n MHz); retune at run time from software
+set CHANNEL_MHZ  2441.0     ;# RFDC centre; channels 2402 + n MHz are fabric offsets around it
+set CHAN_PORT    tie        ;# modem chan_i/chan_stb_i/tx_busy_o/rx_busy_o: "tie" (tied off,
+                            ;#   standalone build) or "external" (BD ports for your own logic)
 
 # NCO = RF frequency folded into (-Fs/2, Fs/2]; Nyquist zone index (1-based) -> odd/even
 proc nco_wrap {f_mhz fs_gsps} {
@@ -39,9 +42,9 @@ proc nyq_even {f_mhz fs_gsps} {
 }
 set ADC_NCO_GHZ [nco_wrap $CHANNEL_MHZ $ADC_FS_GSPS]
 set DAC_NCO_GHZ [nco_wrap $CHANNEL_MHZ $DAC_FS_GSPS]
-set ADC_NYQ     [nyq_even $CHANNEL_MHZ $ADC_FS_GSPS]   ;# 1: even zone (2402 MHz @ 2.56 GSPS -> zone 2)
-set DAC_NYQ     [nyq_even $CHANNEL_MHZ $DAC_FS_GSPS]   ;# 0: zone 1 (2402 MHz < 2560 MHz), normal mode
-puts "INFO: channel $CHANNEL_MHZ MHz: ADC NCO $ADC_NCO_GHZ GHz (nyq_even=$ADC_NYQ), DAC NCO $DAC_NCO_GHZ GHz (nyq_even=$DAC_NYQ)"
+set ADC_NYQ     [nyq_even $CHANNEL_MHZ $ADC_FS_GSPS]   ;# 1: even zone (2441 MHz @ 2.56 GSPS -> zone 2)
+set DAC_NYQ     [nyq_even $CHANNEL_MHZ $DAC_FS_GSPS]   ;# 0: zone 1 (2441 MHz < 2560 MHz), normal mode
+puts "INFO: RFDC centre $CHANNEL_MHZ MHz: ADC NCO $ADC_NCO_GHZ GHz (nyq_even=$ADC_NYQ), DAC NCO $DAC_NCO_GHZ GHz (nyq_even=$DAC_NYQ)"
 # --------------------------------------------------------------------------------------------
 
 create_bd_design $bd_name
@@ -132,6 +135,17 @@ connect_bd_net $rstrf [get_bd_pins nb_radio/aresetn] [get_bd_pins rfdc/m0_axis_a
 connect_bd_intf_net [get_bd_intf_pins rfdc/m00_axis] [get_bd_intf_pins nb_radio/s_axis_adci]
 connect_bd_intf_net [get_bd_intf_pins rfdc/m01_axis] [get_bd_intf_pins nb_radio/s_axis_adcq]
 connect_bd_intf_net [get_bd_intf_pins nb_radio/m_axis_dac] [get_bd_intf_pins rfdc/s00_axis]
+# direct channel control: the strobe is synchronised inside the modem, so any clock domain works
+if {$CHAN_PORT eq "external"} {
+  foreach p {chan_i chan_stb_i tx_busy_o rx_busy_o} { make_bd_pins_external [get_bd_pins nb_radio/$p] }
+} else {
+  set c_ch  [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant chan_tie]
+  set c_stb [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant chan_stb_tie]
+  set_property -dict [list CONFIG.CONST_WIDTH {7} CONFIG.CONST_VAL {0}] $c_ch
+  set_property -dict [list CONFIG.CONST_WIDTH {1} CONFIG.CONST_VAL {0}] $c_stb
+  connect_bd_net [get_bd_pins chan_tie/dout]     [get_bd_pins nb_radio/chan_i]
+  connect_bd_net [get_bd_pins chan_stb_tie/dout] [get_bd_pins nb_radio/chan_stb_i]
+}
 
 # ---------------- DMA + clock-crossing FIFOs ----------------
 set dma [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma axi_dma]

@@ -28,6 +28,11 @@ TESTS=(
   "aci_1MHz_grid_-1MHz    +R=50 +MOD=1 +ESN0=22 +ACI=20 +ACI_OFF=-1000000 +GAIN=0.01 +NPKT=8"
   "aci_0.83MHz_+35dB      +R=60 +MOD=0 +ESN0=14 +ACI=35 +ACI_OFF=1000000 +GAIN=0.01 +NPKT=8"
   "weak_input_-45dB       +R=50 +MOD=1 +ESN0=25 +GAIN=0.003 +NPKT=6"
+  # channel port + fabric NCOs (no AXI): edge channels, hopping, RX trim sign
+  "chan_78_5MHz_16qam     +R=10 +MOD=1 +ESN0=60 +CHAN=78 +NPKT=6"
+  "hop_5MHz_impaired      +R=10 +MOD=1 +ESN0=30 +MP=1 +CFO=20000 +SRO=20 +CHAN=3 +HOP=37 +NPKT=8"
+  "hop_1MHz_qpsk          +R=50 +MOD=0 +ESN0=20 +CFO=8000 +CHAN=0 +HOP=29 +NPKT=6"
+  "rx_trim_sign_+5MHz     +R=10 +MOD=1 +ESN0=40 +CHAN=10 +CFO=5000000 +TRIM=5000000 +NPKT=4"
 )
 pass=0; fail=0
 for t in "${TESTS[@]}"; do

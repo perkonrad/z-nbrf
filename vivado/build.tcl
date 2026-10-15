@@ -17,7 +17,7 @@ if {$bp ne ""} {
 
 set srcs [list nb_pkg.sv nb_coefs_pkg.sv cordic.sv fir_cplx.sv cic_dec.sv cic_int.sv agc.sv \
               timing_rec.sv preamble_det.sv sym_proc.sv deframer.sv tx_framer.sv sync_fifo.sv \
-              axil_regs.sv nb_radio_top.sv nb_radio_wrap.v]
+              axil_regs.sv nco_mix.sv nb_radio_top.sv nb_radio_wrap.v]
 foreach f $srcs { add_files -norecurse $root/rtl/$f }
 set_property file_type SystemVerilog [get_files *.sv]
 update_compile_order -fileset sources_1

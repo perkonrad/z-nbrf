@@ -14,6 +14,12 @@
 #define NB_PLL          0x24  /* RW  [4:0] Kp shift, [12:8] Ki shift                       */
 #define NB_EQ           0x28  /* RW  [4:0] LMS mu shift                                    */
 #define NB_DET          0x2C  /* RW  [7:0] detection threshold rho*256 (default 102=0.4)   */
+#define NB_CHAN         0x30  /* W: [6:0] select channel (same as the chan_i/chan_stb_i  */
+                              /*   port; last writer wins). R: [6:0] channel, [8] tx_busy, [9] rx_busy */
+#define NB_NCO_BASE     0x34  /* RW  s32 fabric NCO increment of channel 0, f/fs0*2^32       */
+                              /*   (default -39 MHz: 2402 MHz around a 2441 MHz RFDC centre)  */
+#define NB_NCO_STEP     0x38  /* RW  s32 increment per channel (default 1 MHz)               */
+#define NB_RX_TRIM      0x3C  /* RW  s32 added to the RX increment (software AFC)            */
 #define NB_RX_OK        0x40  /* RO  frames with good CRC-16                               */
 #define NB_RX_CRC_ERR   0x44  /* RO  frames with bad CRC-16                                */
 #define NB_RX_HDR_ERR   0x48  /* RO  detections with bad header CRC-8                      */
