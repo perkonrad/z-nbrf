@@ -1,0 +1,27 @@
+=== nb_radio_top ===
+
+        +----------Local Count, excluding submodules.
+        | 
+    54328 wires
+   171627 wire bits
+      644 public wires
+    91135 public wire bits
+       36 ports
+      192 port bits
+    54689 cells
+        1   BUFG
+     3530   CARRY4
+      299   DSP48E2
+    30650   FDRE
+      514   FDSE
+      105   IBUF
+      583   INV
+    11467   LUT2
+     1942   LUT3
+     1091   LUT4
+     2693   LUT5
+     1585   LUT6
+       87   OBUF
+        2   RAMB36E2
+      140   SRL16E
+

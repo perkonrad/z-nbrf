@@ -1,0 +1,22 @@
+clean_5MHz_qpsk          RESULT: PASS                       MER 37.3 dB
+clean_5MHz_16qam         RESULT: PASS                       MER 34.6 dB
+clean_1MHz_16qam         RESULT: PASS                       MER 35.0 dB
+digital_loopback         RESULT: PASS                       MER 34.0 dB
+test_generator           RESULT: PASS                       MER 29.2 dB
+rx_backpressure          RESULT: PASS                       MER 33.6 dB
+max_len_4095             RESULT: PASS                       MER 28.2 dB
+tiny_frames              RESULT: PASS                       MER 37.7 dB
+bw_2.5MHz_impaired       RESULT: PASS                       MER 27.6 dB
+bw_3.08MHz_impaired      RESULT: PASS                       MER 28.2 dB
+bw_1MHz_impaired         RESULT: PASS                       MER 28.0 dB
+5MHz_qpsk_10dB_all       RESULT: PASS (BER 3.71e-04)        MER 11.1 dB
+5MHz_16qam_22dB_all      RESULT: PASS (BER 0.00e+00)        MER 21.8 dB
+1MHz_qpsk_12dB_all       RESULT: PASS (BER 0.00e+00)        MER 13.1 dB
+cfo_edge_5MHz_+100k      RESULT: PASS (BER 0.00e+00)        MER 15.0 dB
+cfo_edge_5MHz_-110k      RESULT: PASS (BER 0.00e+00)        MER 14.9 dB
+cfo_edge_1MHz_-22k       RESULT: PASS                       MER 24.5 dB
+aci_1MHz_grid_+30dB      RESULT: PASS (BER 1.36e-04)        MER 12.2 dB
+aci_1MHz_grid_-1MHz      RESULT: PASS (BER 0.00e+00)        MER 19.5 dB
+aci_0.83MHz_+35dB        RESULT: PASS (BER 0.00e+00)        MER 13.3 dB
+weak_input_-45dB         RESULT: PASS                       MER 24.1 dB
+passed 21 / 21
