@@ -5,7 +5,7 @@
 #define NB_ID           0x00  /* RO  0x4E425231 "NBR1"                                   */
 #define NB_VERSION      0x04  /* RO                                                      */
 #define NB_CTRL         0x08  /* RW  see NB_CTRL_*                                       */
-#define NB_RATE         0x0C  /* RW  [5:0] R = 8..63 -> Rs = 32/R MBd, BW = 40/R MHz     */
+#define NB_RATE         0x0C  /* RW  [5:0] R = 8..63 -> Rs = 40/R MBd, BW = 50/R MHz     */
 #define NB_CIC_SHIFT    0x10  /* RW  [5:0] rx = ceil(4 log2 R), [13:8] tx = ceil(3 log2 R) */
 #define NB_TX_GAIN      0x14  /* RW  [15:0] Q2.14 digital gain before the RF-DAC          */
 #define NB_TEST         0x18  /* RW  [11:0] test frame length, [31:16] min idle symbols    */

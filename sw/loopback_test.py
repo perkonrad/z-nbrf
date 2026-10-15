@@ -2,8 +2,8 @@
 """ZCU111 bring-up / loopback test for nb_radio at 2.4 GHz (run on the board's PYNQ image).
 
 RF path: DAC228 CH0 -> 2.4 GHz BPF -> 30-40 dB attenuation -> 2.4 GHz BPF -> ADC224 CH0.
-The BPFs matter: the DAC also emits the mix-mode image at 4096-f (~1.65 GHz) and the ADC
-undersamples (3rd Nyquist), so anything at 354..432 MHz or 1.6..1.7 GHz folds onto the channel.
+The BPFs matter: the DAC also emits its image at 5120-f (~2.64..2.72 GHz) and the ADC
+undersamples (2nd Nyquist), so anything at 80..158 MHz or 2.64..2.72 GHz folds onto the channel.
 
 Stages:
   1. digital loopback (no RF)                    -- PL modem + DMA
@@ -31,8 +31,11 @@ def run_dma(radio, n=30, size=256):
 
 
 def detect_signs(ol):
-    """No frames at all  -> RX NCO sign wrong (signal lands ~2*354 MHz off).
-       Detections but every header fails -> spectrum inverted (TX NCO sign)."""
+    """A wrong NCO sign on either side (or an I/Q lane swap) mirrors the spectrum: frames are
+    still detected and headers still decode, but every payload fails its CRC. Two mirrors
+    cancel, so two of the four combinations work; keep the one with the most good frames.
+    Loopback can't tell which side was mirrored, only the pair; for two-board links that's
+    enough as long as both boards use the same pair."""
     radio = ol.radio
     radio.configure(bw_mhz=1.0, mod="qpsk", test_mode=True)
     best = None
@@ -43,7 +46,7 @@ def detect_signs(ol):
         time.sleep(0.3)
         st = radio.status()
         print(f"    rx_sign {rs:+d} tx_sign {ts:+d}: det {st['detections']:4d} ok {st['rx_ok']:4d} "
-              f"hdr_err {st['rx_hdr_err']:4d}  CFO {st['cfo_hz']:8.0f} Hz")
+              f"crc_err {st['rx_crc_err']:4d} hdr_err {st['rx_hdr_err']:4d}  CFO {st['cfo_hz']:8.0f} Hz")
         if best is None or st["rx_ok"] > best[0]:
             best = (st["rx_ok"], rs, ts)
     ol.rx_sign, ol.tx_sign = best[1], best[2]
@@ -62,7 +65,7 @@ def main():
     print("== 2. NCO sign detection (test generator, channel 0 = 2402 MHz)")
     detect_signs(ol)
 
-    print("== 3. channel scan, 1 MHz channels (R=40), QPSK and 16-QAM")
+    print("== 3. channel scan, 1 MHz channels (R=50), QPSK and 16-QAM")
     for n in range(0, 79, 13):
         f = ol.set_channel(n)
         for mod in ("qpsk", "16qam"):

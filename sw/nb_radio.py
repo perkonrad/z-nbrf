@@ -4,7 +4,7 @@ Typical use on the ZCU111 PYNQ image:
 
     from nb_radio import NbRadioOverlay
     ol = NbRadioOverlay("nb_radio.bit")        # programs PL, LMX/LMK clocks, RFDC NCOs
-    ol.radio.configure(bw_mhz=1.0, mod="qpsk") # 1 MHz channel grid -> R = 40 (or 0.83 MHz, R = 48)
+    ol.radio.configure(bw_mhz=1.0, mod="qpsk") # 1 MHz channel grid -> R = 50 (or 0.83 MHz, R = 60)
     ol.set_channel(17)                         # 2402 + 17 = 2419 MHz
     ol.radio.send(b"hello world")
     print(ol.radio.recv(timeout=1.0))
@@ -14,9 +14,9 @@ import math
 import time
 import struct
 
-FS0 = 256e6          # complex sample rate at the modem's DSP input/output
-ADC_FS_MHZ = 2048.0  # RF-ADC sample rate (2.4 GHz = 3rd Nyquist zone, undersampled)
-DAC_FS_MHZ = 4096.0  # RF-DAC sample rate (2.4 GHz = 2nd Nyquist zone, mix-mode)
+FS0 = 320e6          # complex sample rate at the modem's DSP input/output (= fabric clock)
+ADC_FS_MHZ = 2560.0  # RF-ADC sample rate (2.4 GHz = 2nd Nyquist zone, undersampled)
+DAC_FS_MHZ = 5120.0  # RF-DAC sample rate (2.4 GHz = 1st Nyquist zone, normal mode)
 CH_BASE_MHZ = 2402.0
 CH_SPACING_MHZ = 1.0
 ALPHA = 0.25
@@ -54,9 +54,9 @@ class NbRadio:
     # ---------------------------------------------------------------- configuration
     @staticmethod
     def rate_for_bw(bw_mhz):
-        """Occupied bandwidth = Rs*(1+alpha) = 40/R MHz, R in 8..63 (5.0 .. 0.635 MHz).
-        On a 1 MHz channel grid use R=40 (exactly 1 MHz) or R=48 (0.83 MHz, guard band, +5 dB ACR)."""
-        R = int(round(40.0 / bw_mhz))
+        """Occupied bandwidth = Rs*(1+alpha) = 50/R MHz, R in 8..63 (6.25 .. 0.79 MHz).
+        On a 1 MHz channel grid use R=50 (exactly 1 MHz) or R=60 (0.83 MHz, guard band, +5 dB ACR)."""
+        R = int(round(FS0 / 8e6 * (1 + ALPHA) / bw_mhz))
         return max(8, min(63, R))
 
     def configure(self, bw_mhz=5.0, mod="qpsk", tx_backoff_db=1.0, eq=True, pll=True,
@@ -188,7 +188,7 @@ class NbRadioOverlay:
         plan = ((self.adc, rx_eff, ADC_FS_MHZ, self.rx_sign), (self.dac, tx_mhz, DAC_FS_MHZ, self.tx_sign))
         for blk, f, fs, sign in plan:
             zone = nyquist_zone(f, fs)
-            blk.NyquistZone = 1 if zone % 2 else 2     # DAC: zone 2 = mix-mode
+            blk.NyquistZone = 1 if zone % 2 else 2     # ADC: zone 2 at 2.4 GHz; DAC: zone 1
             ms = blk.MixerSettings
             ms["Freq"] = sign * nco_wrap(f, fs)
             blk.MixerSettings = ms

@@ -5,7 +5,7 @@ module nb_radio_wrap #(
   parameter DAC_SPC = 2
 ) (
   (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 clk CLK" *)
-  (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi:s_axis_tx:m_axis_rx:s_axis_adci:s_axis_adcq:m_axis_dac, ASSOCIATED_RESET aresetn, FREQ_HZ 256000000" *)
+  (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi:s_axis_tx:m_axis_rx:s_axis_adci:s_axis_adcq:m_axis_dac, ASSOCIATED_RESET aresetn, FREQ_HZ 320000000" *)
   input  wire        clk,
   (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 aresetn RST" *)
   (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)

@@ -92,8 +92,8 @@ module axil_regs
     if (rst) begin
       s_axi_bvalid <= 1'b0;
       ctrl    <= 32'h0000_0063;           // tx_en | rx_en | eq_en | pll_en
-      r_rate  <= 32'd8;                   // 5 MHz channel (4 MBd)
-      r_shift <= {18'd0, 6'd9, 2'd0, 6'd12};
+      r_rate  <= 32'd10;                  // 5 MHz channel (4 MBd at 320 MHz)
+      r_shift <= {18'd0, 6'd10, 2'd0, 6'd14};   // tx ceil(3 log2 R), rx ceil(4 log2 R)
       r_txg   <= 32'h4000;                // 1.0 (Q2.14)
       r_test  <= {16'd32, 4'd0, 12'd64};
       r_agc   <= {11'd0, 5'd9, 16'd11650};   // calibrated: QPSK symbols at +-8192 after timing recovery

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Generate filter coefficients, preamble and CORDIC table for nb_radio.
 
-Rate plan (fabric clock = 256 MHz, 1 complex sample/clk from RFDC):
-    fs0 = 256 MSPS  (RFDC DDC/DUC IQ, x8 decimation/interpolation of 2.048 GSPS)
-    fs1 = fs0/R     (CIC, R = 8..40)          = 8 samples/symbol
+Rate plan (fabric clock = 320 MHz, 1 complex sample/clk from RFDC):
+    fs0 = 320 MSPS  (RFDC DDC IQ, x8 decimation of 2.56 GSPS; DUC x8 to 5.12 GSPS)
+    fs1 = fs0/R     (CIC, R = 8..63)          = 8 samples/symbol
     fs2 = fs1/2     (CFIR half-rate)          = 4 samples/symbol (RRC, AGC, timing)
-    Rs  = fs0/(8R)  = 32/R MBd, occupied BW = Rs*(1+alpha) = 40/R MHz  -> 1..5 MHz
+    Rs  = fs0/(8R)  = 40/R MBd, occupied BW = Rs*(1+alpha) = 50/R MHz  -> 1..5 MHz (R = 50..10)
+All coefficients are in units of the symbol rate, so they don't depend on fs0.
 """
 import numpy as np
 from scipy import signal

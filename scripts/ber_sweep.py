@@ -27,13 +27,13 @@ def run(args, tag):
     return d
 
 jobs = []
-for R in (8, 40):
+for R in (10, 50):        # 5 MHz and 1 MHz channels at the 320 MHz fabric clock
     for e in (5, 6, 7, 8, 9, 10, 11):
         jobs.append(dict(R=R, MOD=0, ESN0=e))
     for e in (12, 13, 14, 15, 16, 17, 18):
         jobs.append(dict(R=R, MOD=1, ESN0=e))
 def go(j):
-    npkt = 40 if j["R"] == 8 else 12
+    npkt = 40 if j["R"] == 10 else 12
     args = [f"+R={j['R']}", f"+MOD={j['MOD']}", f"+ESN0={j['ESN0']}", f"+NPKT={npkt}", "+LMIN=200",
             "+LMAX=400", "+CFO=5000", "+SRO=10", f"+SEED={j['ESN0']*7+j['R']}"]
     r = run(args, f"R{j['R']}_M{j['MOD']}_E{j['ESN0']}")

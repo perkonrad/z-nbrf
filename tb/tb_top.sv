@@ -1,17 +1,20 @@
 // End-to-end testbench: DMA-style packets -> nb_radio TX -> channel -> nb_radio RX -> check.
-// Channel (256 MSPS complex baseband, i.e. what the RFDC DUC/DDC pair presents):
+// Channel (320 MSPS complex baseband, i.e. what the RFDC DUC/DDC pair presents):
 //   sample-rate offset + fractional delay (linear interp, ~50x oversampled), 2-path echo,
 //   carrier frequency offset, AWGN at a given Es/N0, gain, 12-bit ADC quantisation.
-// Plusargs: +R=<8..40> +MOD=<0|1> +ESN0=<dB> +CFO=<Hz> +SRO=<ppm> +MP=<0|1> +NPKT=<n>
+// Plusargs: +R=<8..63> +MOD=<0|1> +ESN0=<dB> +CFO=<Hz> +SRO=<ppm> +MP=<0|1> +NPKT=<n>
 //           +LMIN/+LMAX=<bytes> +LPBK=<0|1> (internal digital loopback) +GAIN=<lin> +DUMP=<0|1>
+//           +INV=1 (conjugate RX input: spectral inversion) +IQSWAP=1 (swap ADC I/Q lanes)
 `timescale 1ns/1ps
 module tb_top;
   logic clk = 0, aresetn = 0;
-  always #1.953125 clk = ~clk;   // 256 MHz
+  localparam real FS = 320.0e6;   // fabric clock = complex sample rate at the modem ports
+  always #1.5625 clk = ~clk;      // 320 MHz
 
   // ---------------- plusargs ----------------
   int    TEST = 0, BP = 0;
   int    R = 8, MOD = 0, NPKT = 20, LMIN = 1, LMAX = 200, MP = 0, LPBK = 0, DUMP = 1, SEED = 1;
+  int    INV = 0, IQSWAP = 0;
   real   ESN0 = 40.0, CFO = 0.0, SRO = 0.0, GAIN = 0.5;
 
   // ---------------- DUT ----------------
@@ -42,20 +45,25 @@ module tb_top;
   );
 
   // ---------------- AXI-Lite BFM ----------------
+  // AXI-Lite BFM. Driven and sampled on the falling edge: with --timing, Verilator may resume a
+  // process woken by @(posedge clk) before the DUT's flops evaluate that edge, so values the TB
+  // assigns or reads right after a rising edge race the DUT (the TB hung in its first write).
   task automatic axil_wr(input logic [7:0] a, input logic [31:0] d);
-    @(posedge clk);
-    awaddr <= a; wdata <= d; awvalid <= 1; wvalid <= 1;
-    do @(posedge clk); while (!awready);
-    awvalid <= 0; wvalid <= 0;
-    do @(posedge clk); while (!bvalid);
+    @(negedge clk);
+    awaddr = a; wdata = d; awvalid = 1; wvalid = 1;
+    while (!awready) @(negedge clk);      // stable here, so the next rising edge is the handshake
+    @(negedge clk);
+    awvalid = 0; wvalid = 0;
+    while (!bvalid) @(negedge clk);
   endtask
 
   task automatic axil_rd(input logic [7:0] a, output logic [31:0] d);
-    @(posedge clk);
-    araddr <= a; arvalid <= 1;
-    do @(posedge clk); while (!arready);
-    arvalid <= 0;
-    do @(posedge clk); while (!rvalid);
+    @(negedge clk);
+    araddr = a; arvalid = 1;
+    while (!arready) @(negedge clk);
+    @(negedge clk);
+    arvalid = 0;
+    while (!rvalid) @(negedge clk);
     d = rdata;
   endtask
 
@@ -95,7 +103,7 @@ module tb_top;
 
   always @(posedge clk) begin
     real xi, xq, yi, yq, ei, eq_, d, ci, cs, zi, zq;
-    xi = real'($signed(dac[47:32]));     // 256 MSPS sample x(n) (sample 1 of the pair)
+    xi = real'($signed(dac[47:32]));     // 320 MSPS sample x(n) (sample 1 of the pair)
     xq = real'($signed(dac[63:48]));
     bi[wp] = xi; bq[wp] = xq;
     wp = (wp + 1) % NB;
@@ -115,14 +123,14 @@ module tb_top;
     if (ACI > -200.0) begin
       real ai, aq, ca, sa;
       rd_buf(d + 3000.0, ai, aq);
-      aph = aph + 6.283185307179586 * ACI_OFF / 256.0e6;
+      aph = aph + 6.283185307179586 * ACI_OFF / FS;
       if (aph > 6.283185307179586) aph = aph - 6.283185307179586;
       ca = $cos(aph) * (10.0 ** (ACI / 20.0)); sa = $sin(aph) * (10.0 ** (ACI / 20.0));
       yi = yi + ai * ca - aq * sa;
       yq = yq + ai * sa + aq * ca;
     end
     // CFO
-    ph = ph + 6.283185307179586 * CFO / 256.0e6;
+    ph = ph + 6.283185307179586 * CFO / FS;
     if (ph > 6.283185307179586) ph = ph - 6.283185307179586;
     ci = $cos(ph); cs = $sin(ph);
     zi = (yi * ci - yq * cs) * GAIN;
@@ -131,6 +139,10 @@ module tb_top;
     sigma = $sqrt(pavg * GAIN * GAIN * 8.0 * real'(R) / (10.0 ** (ESN0 / 10.0)) / 2.0);
     zi = zi + sigma * gauss();
     zq = zq + sigma * gauss();
+    // RF front-end conventions: spectral inversion (wrong-sign NCO on a real ADC) = conjugate;
+    // an I/Q lane swap is the same up to a 90 degree rotation
+    if (INV != 0) zq = -zq;
+    if (IQSWAP != 0) begin real t; t = zi; zi = zq; zq = t; end
     adc_i <= adc_q12(zi);
     adc_q <= adc_q12(zq);
     n++;
@@ -164,13 +176,14 @@ module tb_top;
       for (int b = 0; b < len; b++) exp_q[p].push_back(byte'($urandom));
       exp_mod[p] = MOD;
       for (int b = 0; b < len; b++) begin
-        @(posedge clk);
-        tx_tdata  <= exp_q[p][b];
-        tx_tvalid <= 1;
-        tx_tlast  <= (b == len - 1);
-        do @(posedge clk); while (!tx_tready);
-        tx_tvalid <= 0;
-        tx_tlast  <= 0;
+        @(negedge clk);                    // same falling-edge discipline as the AXI-Lite BFM
+        tx_tdata  = exp_q[p][b];
+        tx_tvalid = 1;
+        tx_tlast  = (b == len - 1);
+        while (!tx_tready) @(negedge clk);
+        @(negedge clk);
+        tx_tvalid = 0;
+        tx_tlast  = 0;
       end
       sent++;
     end
@@ -260,11 +273,13 @@ module tb_top;
     void'($value$plusargs("ACI=%f", ACI));
     void'($value$plusargs("ACI_OFF=%f", ACI_OFF));
     void'($value$plusargs("DACDUMP=%d", DACDUMP));
+    void'($value$plusargs("INV=%d", INV));
+    void'($value$plusargs("IQSWAP=%d", IQSWAP));
     void'($urandom(SEED));
     mp_d  = 4.0 * real'(R);                // echo at 0.5 symbol
     mp_ai = 0.25 * $cos(0.7);
     mp_aq = 0.25 * $sin(0.7);
-    rs    = 32.0e6 / real'(R);
+    rs    = FS / 8.0 / real'(R);
     if (DUMP != 0) fd = $fopen("syms.txt", "w");
     $display("=== nb_radio TB: R=%0d (Rs=%.3f MBd, BW=%.2f MHz) MOD=%s Es/N0=%.1f dB CFO=%.0f Hz SRO=%.1f ppm MP=%0d LPBK=%0d",
              R, rs / 1e6, 1.25 * rs / 1e6, MOD ? "16QAM" : "QPSK", ESN0, CFO, SRO, MP, LPBK);

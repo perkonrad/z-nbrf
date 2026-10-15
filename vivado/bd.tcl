@@ -2,17 +2,18 @@
 #
 #   PS (A53) --HPM0--> SmartConnect --> RFDC AXI-Lite (100 MHz)
 #                                   --> AXI DMA lite   (100 MHz)
-#                                   --> nb_radio regs  (256 MHz, SmartConnect does the CDC)
-#   AXI DMA MM2S --> async AXIS FIFO --> nb_radio TX --> RF-DAC tile 228 ch0 (4.096 GSPS, IQ, x8,
-#                                                        2 samples/clk, NCO, mix-mode = 2nd Nyquist)
-#   RF-ADC tile 224 ch0 (2.048 GSPS, IQ, /8, NCO, 3rd-Nyquist undersampling at 2.4 GHz)
+#                                   --> nb_radio regs  (320 MHz, SmartConnect does the CDC)
+#   AXI DMA MM2S --> async AXIS FIFO --> nb_radio TX --> RF-DAC tile 228 ch0 (5.12 GSPS, IQ, x8,
+#                                                        2 samples/clk, NCO, 1st Nyquist)
+#   RF-ADC tile 224 ch0 (2.56 GSPS, IQ, /8, NCO, 2nd-Nyquist undersampling at 2.4 GHz)
 #                                       --> nb_radio RX --> async AXIS FIFO --> AXI DMA S2MM
 #
-# 2.4 GHz channel plan (2402 + n MHz): ADC alias = wrap(f, 2048) = +354+n MHz (zone 3, odd),
-# DAC alias = wrap(f, 4096) = -1694+n MHz (zone 2, mix-mode). Runtime retuning: sw/nb_radio.py.
-#   Radio clock: RFDC clk_adc0 (256 MHz) -> clk_wiz (BUFG + locked) -> m0/s0_axis_aclk + nb_radio
+# 2.4 GHz channel plan (2402 + n MHz): ADC alias = wrap(f, 2560) = -158+n MHz (zone 2, even),
+# DAC NCO = wrap(f, 5120) = +2402+n MHz (zone 1, normal mode). Runtime retuning: sw/nb_radio.py.
+#   Radio clock: RFDC clk_adc0 (320 MHz) -> BUFG -> m0/s0_axis_aclk + nb_radio
 #
-# RFDC configuration: ADC 2.048 GSPS, DAC 4.096 GSPS, tile PLLs from a 409.6 MHz reference
+# RFDC configuration: ADC 2.56 GSPS, DAC 5.12 GSPS, tile PLLs from a 409.6 MHz reference
+# (both PLLs run the VCO at 10.24 GHz = 25 x 409.6, divided by 4 and 2)
 # (the ZCU111 LMX2594 must be programmed for 409.6 MHz -- e.g. xrfclk in PYNQ, or the
 # Xilinx rfclk example). RFDC CONFIG property names below follow the Gen1 IP (v2.x);
 # if a property is rejected by your Vivado version, set the same values in the RFDC GUI.
@@ -20,10 +21,10 @@
 set bd_name nb_radio_bd
 
 # ---- user knobs ---------------------------------------------------------------------------
-set ADC_FS_GSPS  2.048      ;# RF-ADC sample rate  (AXIS = 2048/8 = 256 MSPS, 1 sample/clk)
-set DAC_FS_GSPS  4.096      ;# RF-DAC sample rate  (AXIS = 4096/8 = 512 MSPS, 2 samples/clk)
+set ADC_FS_GSPS  2.56       ;# RF-ADC sample rate  (AXIS = 2560/8 = 320 MSPS, 1 sample/clk)
+set DAC_FS_GSPS  5.12       ;# RF-DAC sample rate  (AXIS = 5120/8 = 640 MSPS, 2 samples/clk)
 set REFCLK_MHZ   409.600    ;# RFDC tile PLL reference
-set AXIS_MHZ     256.000    ;# fabric / AXI4-Stream clock
+set AXIS_MHZ     320.000    ;# fabric / AXI4-Stream clock
 set CHANNEL_MHZ  2402.0     ;# power-up channel (2402 + n MHz); retune at run time from software
 
 # NCO = RF frequency folded into (-Fs/2, Fs/2]; Nyquist zone index (1-based) -> odd/even
@@ -38,8 +39,8 @@ proc nyq_even {f_mhz fs_gsps} {
 }
 set ADC_NCO_GHZ [nco_wrap $CHANNEL_MHZ $ADC_FS_GSPS]
 set DAC_NCO_GHZ [nco_wrap $CHANNEL_MHZ $DAC_FS_GSPS]
-set ADC_NYQ     [nyq_even $CHANNEL_MHZ $ADC_FS_GSPS]   ;# 0: odd zone (2402 MHz @ 2.048 GSPS -> zone 3)
-set DAC_NYQ     [nyq_even $CHANNEL_MHZ $DAC_FS_GSPS]   ;# 1: even zone -> mix-mode (zone 2)
+set ADC_NYQ     [nyq_even $CHANNEL_MHZ $ADC_FS_GSPS]   ;# 1: even zone (2402 MHz @ 2.56 GSPS -> zone 2)
+set DAC_NYQ     [nyq_even $CHANNEL_MHZ $DAC_FS_GSPS]   ;# 0: zone 1 (2402 MHz < 2560 MHz), normal mode
 puts "INFO: channel $CHANNEL_MHZ MHz: ADC NCO $ADC_NCO_GHZ GHz (nyq_even=$ADC_NYQ), DAC NCO $DAC_NCO_GHZ GHz (nyq_even=$DAC_NYQ)"
 # --------------------------------------------------------------------------------------------
 
@@ -104,30 +105,28 @@ foreach intf {adc0_clk dac0_clk sysref_in vin0_01 vout00} {
 }
 
 # ---------------- radio clock ----------------
-set cw [create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz clk_radio]
-set_property -dict [list \
-  CONFIG.PRIM_IN_FREQ $AXIS_MHZ \
-  CONFIG.CLKOUT1_REQUESTED_OUT_FREQ $AXIS_MHZ \
-  CONFIG.USE_RESET {false} \
-  CONFIG.USE_LOCKED {true} \
-] $cw
-connect_bd_net [get_bd_pins rfdc/clk_adc0] [get_bd_pins clk_radio/clk_in1]
+# clk_adc0 only starts once software has programmed the LMX/LMK and started ADC tile 224, i.e.
+# well after the bitstream is loaded. An MMCM fed from it would need a reset after the clock is
+# stable (UG572), so the radio clock is just clk_adc0 on a BUFG: no lock to lose, same frequency.
+# proc_sys_reset holds the radio domain in reset until that clock runs.
+set bufg [create_bd_cell -type ip -vlnv xilinx.com:ip:util_ds_buf clk_radio]
+set_property CONFIG.C_BUF_TYPE {BUFG} $bufg
+connect_bd_net [get_bd_pins rfdc/clk_adc0] [get_bd_pins clk_radio/BUFG_I]
 
 set rst_ps [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset rst_ps]
 set rst_rf [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset rst_radio]
 connect_bd_net [get_bd_pins ps/pl_clk0]     [get_bd_pins rst_ps/slowest_sync_clk]
 connect_bd_net [get_bd_pins ps/pl_resetn0]  [get_bd_pins rst_ps/ext_reset_in] [get_bd_pins rst_radio/ext_reset_in]
-connect_bd_net [get_bd_pins clk_radio/clk_out1] [get_bd_pins rst_radio/slowest_sync_clk]
-connect_bd_net [get_bd_pins clk_radio/locked]   [get_bd_pins rst_radio/dcm_locked]
+connect_bd_net [get_bd_pins clk_radio/BUFG_O] [get_bd_pins rst_radio/slowest_sync_clk]
 
 set clk100  [get_bd_pins ps/pl_clk0]
 set rst100  [get_bd_pins rst_ps/peripheral_aresetn]
-set clkrf   [get_bd_pins clk_radio/clk_out1]
+set clkrf   [get_bd_pins clk_radio/BUFG_O]
 set rstrf   [get_bd_pins rst_radio/peripheral_aresetn]
 
 # ---------------- modem ----------------
 set nb [create_bd_cell -type module -reference nb_radio_wrap nb_radio]
-set_property CONFIG.DAC_SPC {2} $nb      ;# 2 samples/clk to the 4.096 GSPS RF-DAC
+set_property CONFIG.DAC_SPC {2} $nb      ;# 2 samples/clk to the 5.12 GSPS RF-DAC
 connect_bd_net $clkrf [get_bd_pins nb_radio/clk] [get_bd_pins rfdc/m0_axis_aclk] [get_bd_pins rfdc/s0_axis_aclk]
 connect_bd_net $rstrf [get_bd_pins nb_radio/aresetn] [get_bd_pins rfdc/m0_axis_aresetn] [get_bd_pins rfdc/s0_axis_aresetn]
 connect_bd_intf_net [get_bd_intf_pins rfdc/m00_axis] [get_bd_intf_pins nb_radio/s_axis_adci]
@@ -193,7 +192,11 @@ connect_bd_net [get_bd_pins rfdc/irq]             [get_bd_pins irq_cat/In2]
 connect_bd_net [get_bd_pins irq_cat/dout]         [get_bd_pins ps/pl_ps_irq0]
 
 # ---------------- addresses ----------------
+# Pin the modem (sw/nb_radio_regs.h) and the RFDC first, then let Vivado place the rest, so the
+# automatic pass can't hand 0xA0040000 to another slave. The modem decodes 8 address bits;
+# 4 KiB is the smallest segment the PS accepts.
+assign_bd_address -offset 0xA0040000 -range 4K   [get_bd_addr_segs -of_objects [get_bd_intf_pins nb_radio/s_axi]]
+assign_bd_address -offset 0xA0000000 -range 256K [get_bd_addr_segs -of_objects [get_bd_intf_pins rfdc/s_axi]]
 assign_bd_address
-set_property offset 0xA0040000 [get_bd_addr_segs {ps/Data/SEG_nb_radio_reg0}]
 validate_bd_design
 save_bd_design

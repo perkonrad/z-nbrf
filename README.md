@@ -7,16 +7,16 @@ Packets move to and from the A53s over AXI DMA.
 
 | | |
 |---|---|
-| Converters | RF-ADC tile 224 ch0 @ 2.048 GSPS / RF-DAC tile 228 ch0 @ 4.096 GSPS (mix-mode), IQ, x8 DDC/DUC with 48-bit NCO |
+| Converters | RF-ADC tile 224 ch0 @ 2.56 GSPS / RF-DAC tile 228 ch0 @ 5.12 GSPS, IQ, x8 DDC/DUC with 48-bit NCO |
 | RF channels | **2402 + n MHz** (default grid; any carrier the converters reach) — tuned by the RFDC NCOs, see §2a |
-| Fabric | one 256 MHz clock domain; 1 complex sample/clk from the ADC, 2 samples/clk to the DAC |
-| Channel BW | R = 8…63 → Rs = 32/R MBd → BW = Rs·1.25 = **40/R MHz** (5.00 … 1.00 … 0.63 MHz) |
+| Fabric | one 320 MHz clock domain; 1 complex sample/clk from the ADC, 2 samples/clk to the DAC |
+| Channel BW | R = 8…63 → Rs = 40/R MBd → BW = Rs·1.25 = **50/R MHz** (6.25 … 5.00 (R = 10) … 1.00 (R = 50) … 0.79 MHz) |
 | Pulse shaping | RRC α = 0.25, 41 taps (10 symbols) TX and RX |
 | Payload | QPSK or 16-QAM (Gray), PRBS15-scrambled, CRC-16; 1–4095 bytes/frame |
 | Throughput | 4 MBd × 4 b = 16 Mb/s raw at 5 MHz/16-QAM; 1.6 Mb/s at 1 MHz/QPSK |
 | RX sensitivity | payload BER within ~0.5–1 dB of theory (uncoded), see below |
 | Acquisition | CFO ±Rs/36 (±110 kHz @ 5 MHz, ±22 kHz @ 1 MHz) from a single 64-symbol preamble |
-| Verified | 21-case end-to-end RTL regression + BER sweep in Verilator (TX → impaired channel → RX); Yosys UltraScale+ synthesis |
+| Verified | 23-case end-to-end RTL regression + BER sweep in Verilator (TX → impaired channel → RX); Yosys UltraScale+ synthesis |
 | Resources | ~19k LUT, ~31k FF, 299 DSP48E2, 2 RAMB36 (≈5% of the ZU28DR) |
 
 ---
@@ -24,13 +24,13 @@ Packets move to and from the A53s over AXI DMA.
 ## 1. Architecture
 
 ```
-                         256 MHz (RFDC clk_adc0 -> clk_wiz)
+                         320 MHz (RFDC clk_adc0 -> BUFG)
  TX  AXIS bytes ─► tx_framer ─► mapper ─► RRC x4 ─► CFIR x2 ─► CIC xR ─► gain ─► RF-DAC (IQ, DUC x8, NCO)
-     (DMA MM2S)    4 KB pkt buf   1 sps    4 sps     8 sps     256 MSPS
+     (DMA MM2S)    4 KB pkt buf   1 sps    4 sps     8 sps     320 MSPS
                    CRC16, PRBS15
 
  RX  RF-ADC (IQ, DDC /8, NCO) ─► CIC /R ─► CFIR /2 ─► RRC ─► AGC ─► Farrow+Gardner ─┬─► preamble_det ──┐
-                       256 MSPS      8 sps     4 sps      4 sps   4 sps     1 sps       │  (rho, w, phi)    │ commit/est
+                       320 MSPS      8 sps     4 sps      4 sps   4 sps     1 sps       │  (rho, w, phi)    │ commit/est
                                                                                       └─► sym_proc ◄──────┘
                                                                                           A: delay line + CORDIC derotator
                                                                                           B: 5-tap DD-LMS EQ, slicer, PLL
@@ -43,13 +43,13 @@ Packets move to and from the A53s over AXI DMA.
 
 | Point | Rate | Samples/symbol |
 |---|---|---|
-| RF-ADC / RF-DAC | 2.048 / 4.096 GSPS real | — |
-| RFDC AXIS (DDC/DUC x8, IQ) | ADC 256 MSPS (1 sample/clk); DAC 512 MSPS (2 samples/clk, x2 linear interp. in fabric, images < −95 dBc) | 8R |
-| CIC output / input | 256/R MSPS | 8 |
+| RF-ADC / RF-DAC | 2.56 / 5.12 GSPS real | — |
+| RFDC AXIS (DDC/DUC x8, IQ) | ADC 320 MSPS (1 sample/clk); DAC 640 MSPS (2 samples/clk, x2 linear interp. in fabric, images < −95 dBc) | 8R |
+| CIC output / input | 320/R MSPS | 8 |
 | CFIR (x2) output / input | 128/R MSPS | 4 (RRC, AGC, timing recovery) |
-| Symbols | 32/R MBd | 1 |
+| Symbols | 40/R MBd | 1 |
 
-The fabric sees one complex sample per clock at 256 MHz. Everything after the CIC runs at
+The fabric sees one complex sample per clock at 320 MHz. Everything after the CIC runs at
 ≤ 1/8 of the clock, so the symbol-rate processing uses small sequential FSMs with registered DSP
 stages. The minimum symbol period is 64 clocks, and every FSM finishes well inside it, which
 simulation assertions check.
@@ -79,7 +79,7 @@ reset. Retuning takes one AXI write per converter plus an RFDC mixer update even
 
 ```python
 ol = NbRadioOverlay("nb_radio.bit")
-ol.radio.configure(bw_mhz=1.0, mod="qpsk")   # 1 MHz grid -> R = 40
+ol.radio.configure(bw_mhz=1.0, mod="qpsk")   # 1 MHz grid -> R = 50
 ol.set_channel(n)                            # 2402 + n MHz, n = 0..78
 ol.set_channel(k, base=2402, spacing=2)      # any other grid, e.g. 2 MHz spacing
 ```
@@ -88,30 +88,33 @@ ol.set_channel(k, base=2402, spacing=2)      # any other grid, e.g. 2 MHz spacin
 
 | | Sample rate | Nyquist zone at 2402–2480 MHz | NCO value (driver computes) |
 |---|---|---|---|
-| RF-ADC | 2.048 GSPS | 3 (odd) — undersampled | +354 … +432 MHz |
-| RF-DAC | 4.096 GSPS | 2 (even) — **mix-mode** | −1694 … −1616 MHz |
+| RF-ADC | 2.56 GSPS | 2 (even) — undersampled | −158 … −80 MHz |
+| RF-DAC | 5.12 GSPS | 1 — normal mode | +2402 … +2480 MHz |
 
 The NCO is the RF frequency folded into (−Fs/2, Fs/2]. That folding never inverts the
-spectrum, in any zone. At 2.048 GSPS the DAC would put 2.4 GHz in its 3rd zone at −17 dB with
-stronger images, so the DAC runs at 4.096 GSPS. The fabric feeds it 2 samples/clk through a ×2
-linear interpolator; its images are measured below −95 dBc. The ADC stays at 2.048 GSPS, and
-2.4 GHz is plain bandpass sampling.
+spectrum, in any zone. At 5.12 GSPS the whole band sits in the DAC's first Nyquist zone, so no
+mix-mode is needed. The fabric feeds it 2 samples/clk through a ×2 linear interpolator; its
+images are measured below −95 dBc. Both tile PLLs run the VCO at 10.24 GHz from the stock
+409.6 MHz reference (ADC ÷4, DAC ÷2). The ADC does plain bandpass sampling in zone 2.
 
 **Choosing the bandwidth for a 1 MHz grid** (RTL simulation, QPSK at 14 dB Es/N0 with a modulated
 QPSK neighbour one channel away, ADC backed off to leave room for it):
 
 | Setting | Occupied BW | Neighbour at +20 dB | +30 dB | +35 dB |
 |---|---|---|---|---|
-| R = 40 | 1.00 MHz (no guard) | −0.2 dB MER, 0 errors | −1.6 dB, 0 errors | −3.8 dB, first errors |
-| R = 48 | 0.83 MHz (167 kHz guard) | −0.0 dB | −0.2 dB | −0.6 dB, 0 errors |
+| R = 50 | 1.00 MHz (no guard) | −0.2 dB MER, 0 errors | −1.6 dB, 0 errors | −3.8 dB, first errors |
+| R = 60 | 0.83 MHz (167 kHz guard) | −0.0 dB | −0.2 dB | −0.6 dB, 0 errors |
 
 TX leakage into the adjacent 1 MHz channel is −41 dBc and into the alternate channel −79 dBc
-(R = 40). R = 48 costs 17% throughput (0.667 MBd) and buys about 5 dB of adjacent-channel
-rejection. Wider settings span several 1 MHz channels: R = 20 occupies 2 MHz, R = 8 occupies 5.
+(R = 50). R = 60 costs 17% throughput (0.667 MBd) and buys about 5 dB of adjacent-channel
+rejection. Wider settings span several 1 MHz channels: R = 25 occupies 2 MHz, R = 10 occupies 5.
+(These were measured at the earlier 256 MHz clock with R = 40/48; for a given bandwidth the
+modem's behaviour in Hz is unchanged, and the ACI regression cases pass at R = 50/60.)
 
-**RF front end you need:** a 2.4 GHz bandpass filter before the ADC. Undersampling folds 354–432 MHz,
-1.62–1.69 GHz and every other alias zone onto the channel. Also put one after the DAC: mix-mode
-emits an equal-order image at 4096 − f ≈ 1.62–1.69 GHz. Choose an XM500 path with the
+**RF front end you need:** a 2.4 GHz bandpass filter before the ADC. Undersampling folds 80–158 MHz,
+2.64–2.72 GHz and every other alias zone onto the channel. Also put one after the DAC: it emits
+its first image at 5120 − f ≈ 2.64–2.72 GHz, only 160–320 MHz above the band, so check the
+filter's rejection there. Choose an XM500 path with the
 high-frequency (1–4 GHz) baluns.
 
 **Two boards over the air:** acquisition covers ±Rs/36, which is ±22 kHz at 1 MHz, i.e.
@@ -188,14 +191,14 @@ register math (`configure(bw_mhz=…, mod=…)`, `send()`, `recv()`, `status()` 
 ## 5. Verification
 
 Everything below is RTL simulation (Verilator 5). The testbench (`tb/tb_top.sv`) drives
-DMA-style packets into TX. A 256 MSPS complex channel model then applies sample-rate offset
+DMA-style packets into TX. A 320 MSPS complex channel model then applies sample-rate offset
 with fractional delay, a two-path echo (0.25∠40° at ½ symbol), CFO, AWGN at a set Es/N0 and
 12-bit ADC quantisation. The model feeds RX, and every payload byte is checked.
 
 ```
-tb/regress.sh                 # 21 cases, ~6 min
+tb/regress.sh                 # 23 cases, ~8 min
 python3 scripts/ber_sweep.py  # BER vs Es/N0, 5 MHz and 1 MHz channels
-tb/run.sh +R=13 +MOD=1 +ESN0=20 +CFO=30000 +SRO=20 +MP=1 +NPKT=20   # any single scenario
+tb/run.sh +R=16 +MOD=1 +ESN0=20 +CFO=30000 +SRO=20 +MP=1 +NPKT=20   # any single scenario
 ```
 
 **Regression (all pass):**
@@ -206,7 +209,7 @@ tb/run.sh +R=13 +MOD=1 +ESN0=20 +CFO=30000 +SRO=20 +MP=1 +NPKT=20   # any single
 | digital loopback, internal test generator, RX backpressure (25% tready) | pass |
 | 4000–4095-byte 16-QAM frames with 20 kHz CFO + 20 ppm | pass |
 | 1–3-byte frames | pass |
-| 2.5 / 3.08 / 1 MHz channels, 16-QAM, echo + CFO + SRO, 30 dB | pass, MER ≈ 28 dB |
+| 6.25 (R = 8) / 2.5 / 3.13 / 1 MHz channels, 16-QAM, echo + CFO + SRO, 30 dB | pass, MER ≈ 28 dB |
 | 5 MHz QPSK @ 10 dB, all impairments, 50 kHz CFO | 10/10 headers, BER 3.7e-4 |
 | 5 MHz 16-QAM @ 22 dB, all impairments | 0 bit errors |
 | 1 MHz QPSK @ 12 dB, all impairments | 0 bit errors |
@@ -226,7 +229,7 @@ tb/run.sh +R=13 +MOD=1 +ESN0=20 +CFO=30000 +SRO=20 +MP=1 +NPKT=20   # any single
 vivado -mode batch -source vivado/build.tcl -tclargs 8
 # -> build/vivado/nb_radio.bit / .hwh (PYNQ) / .xsa (Vitis, PetaLinux)
 ```
-`vivado/bd.tcl` builds the block design: PS, RFDC, clk_wiz on `clk_adc0`, the modem as a
+`vivado/bd.tcl` builds the block design: PS, RFDC, a BUFG on `clk_adc0` as the radio clock, the modem as a
 module reference (through the Verilog wrapper `nb_radio_wrap.v`), AXI DMA, async AXIS FIFOs
 and SmartConnects. Carrier NCOs and the sample rate are set at the top of the file.
 
@@ -242,9 +245,11 @@ and SmartConnects. Carrier NCOs and the sample rate are set at the top of the fi
 3. **Run** `sw/loopback_test.py`. It works through three stages. Digital loopback exercises the
    PL and DMA only. Then the internal test generator runs on channel 0 while the script tries
    all four NCO sign combinations, because conventions differ between RFdc driver versions.
-   * No detections at all means the RX sign is wrong: the signal lands ~700 MHz off.
-   * Detections but every header failing means the TX sign is wrong: the spectrum is inverted,
-     and the diagonal header symbols flip.
+   A wrong NCO sign on either side, or an I/Q lane swap, mirrors the spectrum. Every frame is
+   still detected and its header still decodes (the BPSK-diagonal preamble and header only
+   rotate under conjugation, and the preamble estimate absorbs that rotation), but every
+   payload fails its CRC. Two mirrors cancel, so two of the four combinations work, and the
+   script keeps the one with the most good frames. Simulate it with `+INV=1` or `+IQSWAP=1`.
    Finally it scans channels 0…78 with DMA packets, in QPSK and 16-QAM.
 4. **Levels.** The AGC covers 1/256…1024, so anything from about −50 dBFS up works.
    Leave 30+ dB of ADC headroom if strong neighbours or Wi-Fi share the band; processing gain at
@@ -267,17 +272,17 @@ symmetric taps would halve that if it ever matters.
 **Not run here (no Vivado in this environment):**
 * `bd.tcl` and `build.tcl` have not been executed. RFDC `CONFIG.*` property names and enum
   values (`ADC_Mixer_Mode`, `ADC_Data_Type`, `*_Data_Width`) follow the Gen1 IP but differ
-  between IP versions. If Vivado rejects one, set the same values in the RFDC GUI: ADC 2.048
-  GSPS and DAC 4.096 GSPS, 409.6 MHz refclk with PLL, IQ, decimation/interpolation 8, fine
-  mixer, ADC 1 / DAC 2 samples per AXIS cycle, 256 MHz fabric clock, DAC Nyquist zone 2
-  (mix-mode), ADC Nyquist zone odd.
+  between IP versions. If Vivado rejects one, set the same values in the RFDC GUI: ADC 2.56
+  GSPS and DAC 5.12 GSPS, 409.6 MHz refclk with PLL, IQ, decimation/interpolation 8, fine
+  mixer, ADC 1 / DAC 2 samples per AXIS cycle, 320 MHz fabric clock, DAC Nyquist zone 1,
+  ADC Nyquist zone 2 (even).
 * The RFDC stream mapping is assumed to be ADC `m00_axis` = I and `m01_axis` = Q, and DAC
   `s00_axis` = {Q1, I1, Q0, I0} (16 bits each, sample 0 earliest in the LSBs). Check it against the IP's port view or example design.
-  An I/Q swap shows up as a mirrored spectrum, i.e. CFO with the wrong sign plus failed
-  detection.
-* Timing closure at 256 MHz is untested. The RTL was restructured with that target in mind,
-  but the parallel FIRs, the CIC integrators and the CORDIC barrel shifter are the paths to
-  watch in the first implementation run.
+  An I/Q swap shows up as a mirrored spectrum: frames detected, headers fine, payload CRC
+  failing (see bring-up step 3).
+* Timing closure at 320 MHz (3.125 ns) is untested. The RTL was pipelined for 256 MHz; the
+  parallel FIRs' adder trees, the 40/44-bit CIC integrators and the CORDIC barrel shifter are
+  the paths to watch in the first implementation run.
 
 **Natural next steps:** a convolutional or LDPC code on the payload (it's uncoded today), a
 continuous-pilot or burst-preamble TX mode, AFC writing straight to the RFDC NCO, a

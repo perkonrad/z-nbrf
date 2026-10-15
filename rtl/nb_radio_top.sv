@@ -1,11 +1,11 @@
 // Narrowband (1-5 MHz) QPSK/16-QAM burst modem for the ZCU111 RFSoC.
 //
-// Clocking: single 256 MHz domain = RFDC AXI4-Stream clock
-//   RF-ADC 2.048 GSPS, IQ, DDC x8 -> 256 MSPS complex, 1 sample/clk (I and Q streams)
-//   RF-DAC 4.096 GSPS, IQ, DUC x8 <- 512 MSPS complex, 2 samples/clk (DAC_SPC=2, default):
+// Clocking: single 320 MHz domain = RFDC AXI4-Stream clock
+//   RF-ADC 2.56 GSPS, IQ, DDC x8 -> 320 MSPS complex, 1 sample/clk (I and Q streams)
+//   RF-DAC 5.12 GSPS, IQ, DUC x8 <- 640 MSPS complex, 2 samples/clk (DAC_SPC=2, default):
 //          {Q1,I1,Q0,I0}, sample 0 earliest; x2 linear interpolation in fabric (images -70 dB).
-//          DAC_SPC=1: 2.048 GSPS, 1 sample/clk {Q,I} (carriers < ~1.8 GHz).
-// Channel: R = 8..40 -> Rs = 32/R MBd, BW = 1.25*Rs = 40/R MHz.
+//          DAC_SPC=1: 2.56 GSPS, 1 sample/clk {Q,I}.
+// Channel: R = 8..63 -> Rs = 40/R MBd, BW = 1.25*Rs = 50/R MHz (5 MHz: R = 10, 1 MHz: R = 50).
 //
 // TX: framer -> mapper -> RRC x4 -> CFIR x2 -> CIC xR -> gain -> RF-DAC
 // RX: RF-ADC -> CIC /R -> CFIR /2 -> RRC -> AGC -> Gardner/Farrow -> preamble det.
@@ -16,7 +16,7 @@ module nb_radio_top
 #(
   parameter int DAC_SPC = 2          // RF-DAC samples per AXI4-Stream cycle (1 or 2)
 )(
-  (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi:s_axis_tx:m_axis_rx:s_axis_adci:s_axis_adcq:m_axis_dac, ASSOCIATED_RESET aresetn, FREQ_HZ 256000000" *)
+  (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi:s_axis_tx:m_axis_rx:s_axis_adci:s_axis_adcq:m_axis_dac, ASSOCIATED_RESET aresetn, FREQ_HZ 320000000" *)
   input  logic        clk,
   input  logic        aresetn,
   // AXI4-Lite control
@@ -169,8 +169,8 @@ module nb_radio_top
   end
   generate
     if (DAC_SPC == 2) begin : g_x2
-      // x2 linear interpolation 256 -> 512 MSPS: (mid(n-1,n), x(n)) per clock.
-      // Response cos^2(pi f / 512 MHz): image at 256 MHz +- 2.5 MHz is < -70 dBc, droop < 0.001 dB.
+      // x2 linear interpolation 320 -> 640 MSPS: (mid(n-1,n), x(n)) per clock.
+      // Response cos^2(pi f / 640 MHz): image at 320 MHz +- 3.1 MHz is < -70 dBc, droop < 0.001 dB.
       logic signed [15:0] pv_i, pv_q, md_i, md_q, cu_i, cu_q;
       always_ff @(posedge clk) begin
         pv_i <= dac_i;

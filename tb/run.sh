@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build (once) and run the end-to-end testbench with Verilator.
-#   tb/run.sh [plusargs...]      e.g. tb/run.sh +R=40 +MOD=0 +ESN0=12 +CFO=3000 +SRO=20 +MP=1
+#   tb/run.sh [plusargs...]      e.g. tb/run.sh +R=50 +MOD=0 +ESN0=12 +CFO=3000 +SRO=20 +MP=1
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OBJ=build/tb

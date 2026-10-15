@@ -14,8 +14,8 @@ Start with `README.md` (architecture, register map, channel plan) and `docs/DESI
 ## Commands
 - Tools: Verilator ≥ 5 and Yosys with the slang plugin (OSS CAD Suite); Python with numpy,
   scipy and matplotlib.
-- Single sim: `tb/run.sh +R=40 +MOD=1 +ESN0=20 +CFO=10000 +SRO=20 +MP=1 +NPKT=10`
-  (other plusargs: `+ACI= +ACI_OFF= +GAIN= +TEST= +LPBK= +BP= +DBG=1..3`). The first plusarg wins.
+- Single sim: `tb/run.sh +R=50 +MOD=1 +ESN0=20 +CFO=10000 +SRO=20 +MP=1 +NPKT=10`
+  (other plusargs: `+ACI= +ACI_OFF= +GAIN= +TEST= +LPBK= +BP= +INV= +IQSWAP= +DBG=1..3`). The first plusarg wins.
 - Regression (must stay 100% pass): `tb/regress.sh`
 - BER sweep: `python3 scripts/ber_sweep.py && python3 scripts/plots.py`
 - Strict elaboration check (catches things Verilator accepts and Vivado rejects):
@@ -23,7 +23,7 @@ Start with `README.md` (architecture, register map, channel plan) and `docs/DESI
 - Bitstream: `vivado -mode batch -source vivado/build.tcl -tclargs 8`
 
 ## Rules of thumb for this codebase
-- Fabric clock is 256 MHz: register every multiplier output before it feeds an adder, clamp or
+- Fabric clock is 320 MHz (R = 10 → 5 MHz, R = 50 → 1 MHz): register every multiplier output before it feeds an adder, clamp or
   shift.
 - Symbol-rate FSMs must finish within 64 clocks (R = 8). Simulation assertions flag overruns;
   run the regression at R = 8 after touching `sym_proc`, `timing_rec` or `preamble_det`.
