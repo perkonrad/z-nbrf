@@ -4,6 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OBJ=build/tb
+mkdir -p build
 if [[ ! -x $OBJ/Vtb_top || -n "${REBUILD:-}" || -n "$(find rtl tb -name "*.sv" -newer $OBJ/Vtb_top)" ]]; then
   verilator --binary --timing -j 0 -O3 -Wno-fatal -Wno-WIDTH -Wno-MODDUP -Wno-PINCONNECTEMPTY \
     --top-module tb_top -Mdir $OBJ -Irtl \
