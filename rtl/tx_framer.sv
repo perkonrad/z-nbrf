@@ -24,7 +24,8 @@ module tx_framer
   input  logic               ce_sym,
   output logic signed [15:0] sym_i,
   output logic signed [15:0] sym_q,
-  output logic [31:0]        frames_sent
+  output logic [31:0]        frames_sent,
+  output logic               busy         // a frame is loading, queued or on air (symbol side)
 );
   // ---------------- packet buffer ----------------
   (* ram_style = "block" *) logic [7:0] mem [4096];
@@ -111,6 +112,7 @@ module tx_framer
   // ---------------- symbol FSM ----------------
   typedef enum logic [1:0] {T_IDLE, T_PRE, T_HDR, T_PAY} tst_t;
   tst_t        tst;
+  assign busy = full || (tst != T_IDLE) || (fst == F_AXIS && widx != 12'd0);
   logic [15:0] icnt;
   logic [5:0]  pcnt;
   logic [4:0]  hcnt;

@@ -5,7 +5,7 @@ module nb_radio_wrap #(
   parameter DAC_SPC = 2
 ) (
   (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 clk CLK" *)
-  (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi:s_axis_tx:m_axis_rx:s_axis_adci:s_axis_adcq:m_axis_dac, ASSOCIATED_RESET aresetn, FREQ_HZ 256000000" *)
+  (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi:s_axis_tx:m_axis_rx:s_axis_adci:s_axis_adcq:m_axis_dac, ASSOCIATED_RESET aresetn, FREQ_HZ 320000000" *)
   input  wire        clk,
   (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 aresetn RST" *)
   (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)
@@ -43,7 +43,12 @@ module nb_radio_wrap #(
   output wire        s_axis_adcq_tready,
   output wire [32*DAC_SPC-1:0] m_axis_dac_tdata,
   output wire        m_axis_dac_tvalid,
-  input  wire        m_axis_dac_tready
+  input  wire        m_axis_dac_tready,
+  // direct channel control (see nb_radio_top.sv); strobe is synchronised inside
+  input  wire [6:0]  chan_i,
+  input  wire        chan_stb_i,
+  output wire        tx_busy_o,
+  output wire        rx_busy_o
 );
   nb_radio_top #(.DAC_SPC(DAC_SPC)) u_top (
     .clk(clk), .aresetn(aresetn),
@@ -62,6 +67,7 @@ module nb_radio_wrap #(
     .s_axis_adcq_tdata(s_axis_adcq_tdata), .s_axis_adcq_tvalid(s_axis_adcq_tvalid),
     .s_axis_adcq_tready(s_axis_adcq_tready),
     .m_axis_dac_tdata(m_axis_dac_tdata), .m_axis_dac_tvalid(m_axis_dac_tvalid),
-    .m_axis_dac_tready(m_axis_dac_tready)
+    .m_axis_dac_tready(m_axis_dac_tready),
+    .chan_i(chan_i), .chan_stb_i(chan_stb_i), .tx_busy_o(tx_busy_o), .rx_busy_o(rx_busy_o)
   );
 endmodule

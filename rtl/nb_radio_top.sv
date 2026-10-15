@@ -1,14 +1,18 @@
 // Narrowband (1-5 MHz) QPSK/16-QAM burst modem for the ZCU111 RFSoC.
 //
-// Clocking: single 256 MHz domain = RFDC AXI4-Stream clock
-//   RF-ADC 2.048 GSPS, IQ, DDC x8 -> 256 MSPS complex, 1 sample/clk (I and Q streams)
-//   RF-DAC 4.096 GSPS, IQ, DUC x8 <- 512 MSPS complex, 2 samples/clk (DAC_SPC=2, default):
+// Clocking: single 320 MHz domain = RFDC AXI4-Stream clock
+//   RF-ADC 2.56 GSPS, IQ, DDC x8 -> 320 MSPS complex, 1 sample/clk (I and Q streams)
+//   RF-DAC 5.12 GSPS, IQ, DUC x8 <- 640 MSPS complex, 2 samples/clk (DAC_SPC=2, default):
 //          {Q1,I1,Q0,I0}, sample 0 earliest; x2 linear interpolation in fabric (images -70 dB).
-//          DAC_SPC=1: 2.048 GSPS, 1 sample/clk {Q,I} (carriers < ~1.8 GHz).
-// Channel: R = 8..40 -> Rs = 32/R MBd, BW = 1.25*Rs = 40/R MHz.
+//          DAC_SPC=1: 2.56 GSPS, 1 sample/clk {Q,I}.
+// Channel: R = 8..63 -> Rs = 40/R MBd, BW = 1.25*Rs = 50/R MHz (5 MHz: R = 10, 1 MHz: R = 50).
 //
-// TX: framer -> mapper -> RRC x4 -> CFIR x2 -> CIC xR -> gain -> RF-DAC
-// RX: RF-ADC -> CIC /R -> CFIR /2 -> RRC -> AGC -> Gardner/Farrow -> preamble det.
+// Channel: the RFDC NCOs stay at a fixed centre (2441 MHz); a fabric NCO on each side moves
+//   the modem to base + chan*step (default 2402 + chan MHz, chan = 0..78, +-39 MHz). chan comes
+//   from the chan_i/chan_stb_i port (no AXI, any clock domain) or from the CHAN register.
+//
+// TX: framer -> mapper -> RRC x4 -> CFIR x2 -> CIC xR -> gain -> (x2 interp) -> NCO mix -> RF-DAC
+// RX: RF-ADC -> NCO mix -> CIC /R -> CFIR /2 -> RRC -> AGC -> Gardner/Farrow -> preamble det.
 //     -> derotator/EQ/PLL -> deframer -> byte FIFO
 module nb_radio_top
   import nb_pkg::*;
@@ -16,7 +20,7 @@ module nb_radio_top
 #(
   parameter int DAC_SPC = 2          // RF-DAC samples per AXI4-Stream cycle (1 or 2)
 )(
-  (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi:s_axis_tx:m_axis_rx:s_axis_adci:s_axis_adcq:m_axis_dac, ASSOCIATED_RESET aresetn, FREQ_HZ 256000000" *)
+  (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi:s_axis_tx:m_axis_rx:s_axis_adci:s_axis_adcq:m_axis_dac, ASSOCIATED_RESET aresetn, FREQ_HZ 320000000" *)
   input  logic        clk,
   input  logic        aresetn,
   // AXI4-Lite control
@@ -57,7 +61,15 @@ module nb_radio_top
   // RF-DAC: per sample {Q,I}, sample 0 in the LSBs
   output logic [32*DAC_SPC-1:0] m_axis_dac_tdata,
   output logic        m_axis_dac_tvalid,
-  input  logic        m_axis_dac_tready
+  input  logic        m_axis_dac_tready,
+  // Direct channel control. chan_i is taken on each rising edge of chan_stb_i, which is
+  // synchronised internally (2 flops), so both may come from another clock domain or from
+  // pins: hold chan_i stable from before the strobe's rising edge until 3 clocks after it.
+  // The new channel is on air ~8 clocks after the edge; the NCO phase stays continuous.
+  input  logic [6:0]  chan_i,
+  input  logic        chan_stb_i,
+  output logic        tx_busy_o,      // a TX frame is loading, queued or still in the filters
+  output logic        rx_busy_o       // the RX is inside a frame (preamble commit .. last byte)
 );
   // ======================= registers / reset =======================
   logic        rst_hw, rst;
@@ -72,6 +84,10 @@ module nb_radio_top
   logic [31:0] st_evm_acc, st_evm_n, st_peak_m, st_peak_e, st_last_hdr, st_det_cnt;
   logic [21:0] agc_gain;
   logic signed [31:0] ted_v;
+  logic        chan_wr;
+  logic [6:0]  chan_wdata, chan;
+  logic [31:0] nco_base, nco_step, rx_trim;
+  logic        fr_busy;
 
   always_ff @(posedge clk) begin
     rst_hw <= ~aresetn;
@@ -82,7 +98,8 @@ module nb_radio_top
   wire rx_en     = ctrl[1];
   wire test_mode = ctrl[2];
   wire dig_lpbk  = ctrl[3];
-  wire eq_en     = ctrl[5];
+  logic [5:0] hop_cnt;
+  wire eq_en     = ctrl[5] && (hop_cnt == 6'd0);   // equaliser restarts from identity after a hop
   wire pll_en    = ctrl[6];
   wire tx_mod16  = ctrl[7];
 
@@ -93,10 +110,52 @@ module nb_radio_top
     .s_axi_arready, .s_axi_rdata, .s_axi_rresp, .s_axi_rvalid, .s_axi_rready,
     .ctrl, .rate, .rx_shift, .tx_shift, .tx_gain, .test_len, .ifs, .agc_target, .agc_mu_sh,
     .ted_kp_sh, .ted_ki_sh, .pll_kp_sh, .pll_ki_sh, .eq_mu_sh, .det_thr,
+    .chan_wr, .chan_wdata, .nco_base, .nco_step, .rx_trim,
     .st_rx_ok, .st_rx_crc, .st_rx_hdr, .st_tx_frames, .st_rx_ovf, .st_pll_freq,
     .st_evm_acc, .st_evm_n, .st_agc_gain({10'd0, agc_gain}), .st_peak_m, .st_peak_e,
-    .st_last_hdr, .st_ted_v(ted_v), .st_det_cnt
+    .st_last_hdr, .st_ted_v(ted_v), .st_det_cnt,
+    .st_chan({22'd0, rx_busy_o, tx_busy_o, 1'b0, chan})
   );
+
+  // ======================= channel select + fabric NCOs =======================
+  (* ASYNC_REG = "TRUE" *) logic [1:0] stb_sync;
+  logic        stb_d, stb_rise;
+  always_ff @(posedge clk) begin
+    stb_sync <= {stb_sync[0], chan_stb_i};
+    stb_d    <= stb_sync[1];
+  end
+  assign stb_rise = stb_sync[1] & ~stb_d;
+
+  // the channel survives the soft reset (CTRL.4): software reconfigures, the hop stays
+  always_ff @(posedge clk) begin
+    if (rst_hw)        chan <= '0;
+    else if (stb_rise) chan <= chan_i;
+    else if (chan_wr)  chan <= chan_wdata;
+  end
+
+  // A hop changes the multipath response the EQ had converged to, and stale taps cost the
+  // first frame on the new channel. Holding eq_en low for 64 clocks (one symbol at R = 8)
+  // resets them to identity; the preamble re-initialises phase and frequency as usual.
+  always_ff @(posedge clk) begin
+    if (rst_hw)                    hop_cnt <= '0;
+    else if (stb_rise || chan_wr)  hop_cnt <= 6'd63;
+    else if (hop_cnt != 6'd0)      hop_cnt <= hop_cnt - 6'd1;
+  end
+
+  // increments at fs0 (2^32 = one cycle per clock); registered multiply, then add
+  logic [31:0] ch_off, inc_tx, inc_rx, ph_tx, ph_rx;
+  always_ff @(posedge clk) begin
+    ch_off <= 32'(chan * nco_step);
+    inc_tx <= nco_base + ch_off;
+    inc_rx <= nco_base + ch_off + rx_trim;
+    if (rst) begin
+      ph_tx <= '0;
+      ph_rx <= '0;
+    end else begin
+      ph_tx <= ph_tx + inc_tx;
+      ph_rx <= ph_rx + inc_rx;
+    end
+  end
 
   // ======================= TX =======================
   // rate strobes: ce8 = fs0/R (8 sps), ce4 = 4 sps, ce_sym = 1 sps
@@ -123,8 +182,18 @@ module nb_radio_top
     .test_len(test_len), .ifs(ifs),
     .s_tdata(s_axis_tx_tdata), .s_tvalid(s_axis_tx_tvalid), .s_tlast(s_axis_tx_tlast),
     .s_tready(s_axis_tx_tready),
-    .ce_sym(ce_sym), .sym_i(sym_i), .sym_q(sym_q), .frames_sent(st_tx_frames)
+    .ce_sym(ce_sym), .sym_i(sym_i), .sym_q(sym_q), .frames_sent(st_tx_frames),
+    .busy(fr_busy)
   );
+
+  // tx_busy also covers the filter tail: RRC span (10 symbols) + CFIR/CIC/NCO delay
+  logic [4:0] tail;
+  always_ff @(posedge clk) begin
+    if (rst)                      tail <= '0;
+    else if (fr_busy)             tail <= 5'd16;
+    else if (ce_sym && tail != 0) tail <= tail - 5'd1;
+  end
+  assign tx_busy_o = fr_busy || (tail != 5'd0);
 
   // RRC x4 (zero-stuffed)
   logic               rrc_tv;
@@ -169,9 +238,11 @@ module nb_radio_top
   end
   generate
     if (DAC_SPC == 2) begin : g_x2
-      // x2 linear interpolation 256 -> 512 MSPS: (mid(n-1,n), x(n)) per clock.
-      // Response cos^2(pi f / 512 MHz): image at 256 MHz +- 2.5 MHz is < -70 dBc, droop < 0.001 dB.
-      logic signed [15:0] pv_i, pv_q, md_i, md_q, cu_i, cu_q;
+      // x2 linear interpolation 320 -> 640 MSPS: (mid(n-1,n), x(n)) per clock.
+      // Response cos^2(pi f / 640 MHz): image at 320 MHz +- 3.1 MHz is < -70 dBc, droop < 0.001 dB.
+      // Interpolating at baseband, before the NCO, keeps that image rejection at any channel.
+      logic signed [15:0] pv_i, pv_q, md_i, md_q, cu_i, cu_q, y0_i, y0_q, y1_i, y1_q;
+      logic [31:0]        ph_md;
       always_ff @(posedge clk) begin
         pv_i <= dac_i;
         pv_q <= dac_q;
@@ -180,9 +251,16 @@ module nb_radio_top
         cu_i <= dac_i;
         cu_q <= dac_q;
       end
-      assign m_axis_dac_tdata = {cu_q, cu_i, md_q, md_i};
+      // sample 0 sits half a 320 MHz period before sample 1: phase - inc/2 (inc is a
+      // frequency below fs0/2, never a wrapped phase, so halving it is exact)
+      assign ph_md = ph_tx - 32'($signed(inc_tx) >>> 1);
+      nco_mix #(.CONJ(1'b0)) u_mix0 (.clk, .phase(ph_md), .x_i(md_i), .x_q(md_q), .y_i(y0_i), .y_q(y0_q));
+      nco_mix #(.CONJ(1'b0)) u_mix1 (.clk, .phase(ph_tx), .x_i(cu_i), .x_q(cu_q), .y_i(y1_i), .y_q(y1_q));
+      assign m_axis_dac_tdata = {y1_q, y1_i, y0_q, y0_i};
     end else begin : g_x1
-      assign m_axis_dac_tdata = {dac_q, dac_i};
+      logic signed [15:0] y_i, y_q;
+      nco_mix #(.CONJ(1'b0)) u_mix (.clk, .phase(ph_tx), .x_i(dac_i), .x_q(dac_q), .y_i(y_i), .y_q(y_q));
+      assign m_axis_dac_tdata = {y_q, y_i};
     end
   endgenerate
   assign m_axis_dac_tvalid = 1'b1;
@@ -191,12 +269,18 @@ module nb_radio_top
   assign s_axis_adci_tready = 1'b1;
   assign s_axis_adcq_tready = 1'b1;
 
+  // RX NCO: e^(-j phase) moves the selected channel to DC. Digital loopback bypasses both
+  // NCOs (it taps the TX at baseband).
+  logic signed [15:0] adc_mi, adc_mq;
+  nco_mix #(.CONJ(1'b1)) u_mix_rx (.clk, .phase(ph_rx), .x_i($signed(s_axis_adci_tdata)),
+    .x_q($signed(s_axis_adcq_tdata)), .y_i(adc_mi), .y_q(adc_mq));
+
   logic               rx_vld;
   logic signed [15:0] rx_i, rx_q;
   always_ff @(posedge clk) begin
     rx_vld <= rx_en & (dig_lpbk ? 1'b1 : s_axis_adci_tvalid);
-    rx_i   <= dig_lpbk ? dac_i : $signed(s_axis_adci_tdata);
-    rx_q   <= dig_lpbk ? dac_q : $signed(s_axis_adcq_tdata);
+    rx_i   <= dig_lpbk ? dac_i : adc_mi;
+    rx_q   <= dig_lpbk ? dac_q : adc_mq;
   end
 
   logic               cic_rv;
@@ -271,6 +355,7 @@ module nb_radio_top
     .cnt_ok(st_rx_ok), .cnt_crc_err(st_rx_crc), .cnt_hdr_err(st_rx_hdr),
     .evm_acc(st_evm_acc), .evm_n(st_evm_n), .last_hdr(st_last_hdr)
   );
+  assign rx_busy_o = df_busy;
 
   logic fifo_full;
   sync_fifo #(.W(9), .AW(12)) u_rx_fifo (

@@ -12,7 +12,7 @@ for R, mk in ((8, "o"), (40, "s")):
     for mod, col in ((0, "#1f5fa6"), (1, "#b5432a")):
         pts = sorted([(r["ESN0"], r["ber"]) for r in res if r["R"] == R and r["MOD"] == mod and r["ber"]])
         ax.semilogy(*zip(*pts), mk, color=col, mfc="none", ms=6,
-                    label=f"RTL {'16-QAM' if mod else 'QPSK'}, {40/R:.0f} MHz ch.")
+                    label=f"RTL {'16-QAM' if mod else 'QPSK'}, {50/R:.0f} MHz ch.")
 ax.set_ylim(5e-5, 0.1); ax.set_xlim(4, 19)
 ax.set_xlabel("Es/N0 (dB)"); ax.set_ylabel("payload BER")
 ax.set_title("nb_radio RTL loopback vs theory (CFO 5 kHz, SRO 10 ppm, uncoded)")

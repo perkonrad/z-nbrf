@@ -39,6 +39,11 @@ module axil_regs
   output logic [4:0]  pll_ki_sh,
   output logic [4:0]  eq_mu_sh,
   output logic [7:0]  det_thr,
+  output logic        chan_wr,        // pulse: AXI write to CHAN, value on chan_wdata
+  output logic [6:0]  chan_wdata,
+  output logic [31:0] nco_base,       // fabric NCO increment for channel 0 (2^32 = fs0)
+  output logic [31:0] nco_step,       // increment per channel
+  output logic [31:0] rx_trim,        // added to the RX increment (software AFC)
   // status inputs
   input  logic [31:0] st_rx_ok,
   input  logic [31:0] st_rx_crc,
@@ -53,9 +58,11 @@ module axil_regs
   input  logic [31:0] st_peak_e,
   input  logic [31:0] st_last_hdr,
   input  logic [31:0] st_ted_v,
-  input  logic [31:0] st_det_cnt
+  input  logic [31:0] st_det_cnt,
+  input  logic [31:0] st_chan         // [6:0] current channel, [8] tx_busy, [9] rx_busy
 );
   logic [31:0] r_rate, r_shift, r_txg, r_test, r_agc, r_ted, r_pll, r_eq, r_det;
+  logic [31:0] r_base, r_step, r_trim;
 
   assign rate       = r_rate[5:0];
   assign rx_shift   = r_shift[5:0];
@@ -71,6 +78,9 @@ module axil_regs
   assign pll_ki_sh  = r_pll[12:8];
   assign eq_mu_sh   = r_eq[4:0];
   assign det_thr    = r_det[7:0];
+  assign nco_base   = r_base;
+  assign nco_step   = r_step;
+  assign rx_trim    = r_trim;
 
   // ---------------- write channel ----------------
   logic       wr;
@@ -92,8 +102,8 @@ module axil_regs
     if (rst) begin
       s_axi_bvalid <= 1'b0;
       ctrl    <= 32'h0000_0063;           // tx_en | rx_en | eq_en | pll_en
-      r_rate  <= 32'd8;                   // 5 MHz channel (4 MBd)
-      r_shift <= {18'd0, 6'd9, 2'd0, 6'd12};
+      r_rate  <= 32'd10;                  // 5 MHz channel (4 MBd at 320 MHz)
+      r_shift <= {18'd0, 6'd10, 2'd0, 6'd14};   // tx ceil(3 log2 R), rx ceil(4 log2 R)
       r_txg   <= 32'h4000;                // 1.0 (Q2.14)
       r_test  <= {16'd32, 4'd0, 12'd64};
       r_agc   <= {11'd0, 5'd9, 16'd11650};   // calibrated: QPSK symbols at +-8192 after timing recovery
@@ -101,8 +111,15 @@ module axil_regs
       r_pll   <= {19'd0, 5'd10, 3'd0, 5'd3};
       r_eq    <= 32'd6;
       r_det   <= 32'd102;                 // rho >= 0.4
+      // 2402 + n MHz around a fixed RFDC centre of 2441 MHz: base = -39 MHz, step = 1 MHz
+      // (increments at fs0 = 320 MSPS: f / 320e6 * 2^32)
+      r_base  <= -32'sd523449139;
+      r_step  <= 32'd13421773;
+      r_trim  <= 32'd0;
+      chan_wr <= 1'b0;
     end else begin
       ctrl[4] <= 1'b0;                    // soft reset is self-clearing
+      chan_wr <= 1'b0;
       if (s_axi_bvalid && s_axi_bready) s_axi_bvalid <= 1'b0;
       if (wr) begin
         s_axi_bvalid <= 1'b1;
@@ -117,6 +134,10 @@ module axil_regs
           6'h09: r_pll   <= wmask(r_pll,   s_axi_wdata, s_axi_wstrb);
           6'h0A: r_eq    <= wmask(r_eq,    s_axi_wdata, s_axi_wstrb);
           6'h0B: r_det   <= wmask(r_det,   s_axi_wdata, s_axi_wstrb);
+          6'h0C: begin chan_wr <= 1'b1; chan_wdata <= s_axi_wdata[6:0]; end
+          6'h0D: r_base  <= wmask(r_base,  s_axi_wdata, s_axi_wstrb);
+          6'h0E: r_step  <= wmask(r_step,  s_axi_wdata, s_axi_wstrb);
+          6'h0F: r_trim  <= wmask(r_trim,  s_axi_wdata, s_axi_wstrb);
           default: ;
         endcase
       end
@@ -145,6 +166,10 @@ module axil_regs
           6'h09: s_axi_rdata <= r_pll;
           6'h0A: s_axi_rdata <= r_eq;
           6'h0B: s_axi_rdata <= r_det;
+          6'h0C: s_axi_rdata <= st_chan;
+          6'h0D: s_axi_rdata <= r_base;
+          6'h0E: s_axi_rdata <= r_step;
+          6'h0F: s_axi_rdata <= r_trim;
           6'h10: s_axi_rdata <= st_rx_ok;
           6'h11: s_axi_rdata <= st_rx_crc;
           6'h12: s_axi_rdata <= st_rx_hdr;
